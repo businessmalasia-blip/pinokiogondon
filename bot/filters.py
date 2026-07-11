@@ -1,6 +1,5 @@
 """Три фильтра анализа токена: концентрация, HUMAN-процент, история дева."""
 
-import asyncio
 import logging
 import time
 from typing import Optional
@@ -10,11 +9,10 @@ from redis.asyncio import Redis
 
 from .config import Settings
 from .helius import HeliusClient
+from .jupiter import get_token_info, token_price, token_volume_24h
 from .pump import fee_payer, find_created_mint
 
 log = logging.getLogger(__name__)
-
-JUPITER_TOKEN_SEARCH_URL = "https://lite-api.jup.ag/tokens/v2/search"
 
 
 # ---------------------------------------------------------------------------
@@ -158,27 +156,8 @@ async def _token_survived(
     session: aiohttp.ClientSession, mint: str, min_volume_usd: float
 ) -> bool:
     """Выживший токен: цена в Jupiter > 0 и суточный объём > порога."""
-    try:
-        async with session.get(
-            JUPITER_TOKEN_SEARCH_URL,
-            params={"query": mint},
-            timeout=aiohttp.ClientTimeout(total=10),
-        ) as resp:
-            data = await resp.json()
-    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-        log.warning("Jupiter: ошибка запроса по %s: %s", mint, exc)
-        return False
-
-    if not isinstance(data, list):
-        return False
-    token = next((item for item in data if item.get("id") == mint), None)
-    if not token:
-        return False
-
-    price = float(token.get("usdPrice") or 0)
-    stats = token.get("stats24h") or {}
-    volume = float(stats.get("buyVolume") or 0) + float(stats.get("sellVolume") or 0)
-    return price > 0 and volume > min_volume_usd
+    info = await get_token_info(session, mint)
+    return token_price(info) > 0 and token_volume_24h(info) > min_volume_usd
 
 
 async def check_dev(

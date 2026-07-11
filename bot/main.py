@@ -1,4 +1,5 @@
-"""Точка входа: WebSocket-подписка на Pump.fun, пайплайн анализа, алерты.
+"""Точка входа: WebSocket-подписка на Pump.fun, пайплайн анализа, алерты,
+Telegram-команды и фоновая проверка исходов.
 
 Запуск: python -m bot.main
 """
@@ -12,17 +13,22 @@ from typing import Optional
 
 import aiohttp
 import websockets
-from aiogram import Bot
+from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.types import BotCommand
 from redis.asyncio import Redis
 
 from .alerts import build_alert_text, extract_token_meta, send_alert, send_startup_message
+from .commands import router as commands_router
 from .config import Settings, load_settings
 from .filters import calculate_human_percent, check_concentration, check_dev
 from .helius import HeliusClient
+from .jupiter import get_token_info, token_price
+from .outcomes import outcomes_loop
 from .prices import get_market_cap, sol_price_loop
 from .pump import find_buy_accounts, has_buy_log
+from .stats import Stats
 
 log = logging.getLogger("bot")
 
@@ -34,7 +40,13 @@ class Context:
     helius: HeliusClient
     http: aiohttp.ClientSession
     tg_bot: Bot
+    stats: Stats
     analysis_semaphore: asyncio.Semaphore
+
+
+async def market_cap(ctx: Context, bonding_curve: str) -> Optional[float]:
+    ctx.stats.bump("mc_calcs")
+    return await get_market_cap(ctx.helius, ctx.redis, bonding_curve)
 
 
 # ---------------------------------------------------------------------------
@@ -47,7 +59,7 @@ async def wait_for_mc_range(ctx: Context, mint: str, bonding_curve: str) -> Opti
     s = ctx.settings
     deadline = time.monotonic() + s.mc_wait_timeout
     while time.monotonic() < deadline:
-        mc = await get_market_cap(ctx.helius, ctx.redis, bonding_curve)
+        mc = await market_cap(ctx, bonding_curve)
         if mc is not None and s.alert_mc_min <= mc <= s.alert_mc_max:
             return mc
         await asyncio.sleep(s.mc_poll_interval)
@@ -66,6 +78,7 @@ async def analyze_token(ctx: Context, mint: str, bonding_curve: str) -> None:
     # Фильтр 1: концентрация
     conc_ok, holders = await check_concentration(mint, ctx.helius, s)
     if not conc_ok:
+        await ctx.stats.record_filter_result(mint, "concentration")
         return
 
     # Фильтр 2: HUMAN-процент
@@ -73,21 +86,26 @@ async def analyze_token(ctx: Context, mint: str, bonding_curve: str) -> None:
         holders, ctx.redis, ctx.helius, s
     )
     if not human_ok:
+        await ctx.stats.record_filter_result(mint, "human")
         return
 
     # Фильтр 3: дев
     dev = await check_dev(mint, ctx.redis, ctx.helius, ctx.http, s)
     if dev["status"] == "Bad":
         log.info("[%s] отсеян: Bad dev", mint)
+        await ctx.stats.record_filter_result(mint, "dev")
         return
 
-    # Все три фильтра пройдены — ждём входа капы в диапазон
+    # Все три фильтра пройдены
+    await ctx.stats.record_filter_result(mint, "passed")
+
+    # Ждём входа капы в диапазон
     mc = await wait_for_mc_range(ctx, mint, bonding_curve)
     if mc is None:
         return
 
     # Контрольная проверка капы прямо перед отправкой
-    final_mc = await get_market_cap(ctx.helius, ctx.redis, bonding_curve)
+    final_mc = await market_cap(ctx, bonding_curve)
     if final_mc is None or not (s.send_guard_mc_min <= final_mc <= s.send_guard_mc_max):
         log.info("[%s] алерт отменён: капа %s вне guard-диапазона", mint, final_mc)
         return
@@ -106,6 +124,12 @@ async def analyze_token(ctx: Context, mint: str, bonding_curve: str) -> None:
     await send_alert(ctx.tg_bot, s.telegram_chat_id, text, image_url)
     log.info("[%s] алерт отправлен, MC $%.0f", mint, final_mc)
 
+    # Фиксируем алерт для /stats и /last; цену берём из Jupiter,
+    # при её отсутствии — оценку из капы (supply Pump.fun = 1 млрд)
+    info = await get_token_info(ctx.http, mint)
+    price = token_price(info) or final_mc / 1e9
+    await ctx.stats.record_alert(mint, name, symbol, final_mc, price)
+
 
 async def handle_buy_signature(ctx: Context, signature: str) -> None:
     """Обработка транзакции с инструкцией buy: извлечение mint/bonding curve,
@@ -115,6 +139,7 @@ async def handle_buy_signature(ctx: Context, signature: str) -> None:
         tx = await ctx.helius.get_transaction(signature)
         if not tx or (tx.get("meta") or {}).get("err"):
             return
+        ctx.stats.bump("tx_checked")
 
         parsed = find_buy_accounts(
             tx, s.pump_program, s.buy_mint_index, s.buy_bonding_curve_index
@@ -128,7 +153,7 @@ async def handle_buy_signature(ctx: Context, signature: str) -> None:
         if not await ctx.redis.set(seen_key, "1", ex=s.seen_mint_ttl, nx=True):
             return
 
-        mc = await get_market_cap(ctx.helius, ctx.redis, bonding_curve)
+        mc = await market_cap(ctx, bonding_curve)
         if mc is None or mc < s.mc_analyze_min:
             # Капа ещё мала — снимаем метку, чтобы следующий buy проверил снова
             await ctx.redis.delete(seen_key)
@@ -168,11 +193,14 @@ async def pump_logs_loop(ctx: Context) -> None:
                     message = json.loads(raw)
                     if message.get("method") != "logsNotification":
                         continue
+                    ctx.stats.mark_event()
+                    ctx.stats.bump("events_received")
                     value = message["params"]["result"]["value"]
                     if value.get("err"):
                         continue
                     if not has_buy_log(value.get("logs") or []):
                         continue
+                    ctx.stats.bump("buys_seen")
                     asyncio.create_task(
                         handle_buy_signature(ctx, value["signature"])
                     )
@@ -186,6 +214,15 @@ async def pump_logs_loop(ctx: Context) -> None:
 # ---------------------------------------------------------------------------
 # Запуск
 # ---------------------------------------------------------------------------
+
+BOT_COMMANDS = [
+    BotCommand(command="status", description="Аптайм и счётчики"),
+    BotCommand(command="stats", description="Статистика алертов и фильтров"),
+    BotCommand(command="last", description="Последние 5 алертов"),
+    BotCommand(command="settings", description="Текущие пороги"),
+    BotCommand(command="help", description="Справка"),
+]
+
 
 async def run() -> None:
     settings = load_settings()
@@ -208,21 +245,34 @@ async def run() -> None:
             helius=helius,
             http=http,
             tg_bot=tg_bot,
+            stats=Stats(redis_client),
             analysis_semaphore=asyncio.Semaphore(settings.max_concurrent_analyses),
         )
 
+        await tg_bot.set_my_commands(BOT_COMMANDS)
         await send_startup_message(tg_bot, settings.telegram_chat_id)
 
-        price_task = asyncio.create_task(
-            sol_price_loop(http, redis_client, settings.sol_price_interval)
-        )
-        ws_task = asyncio.create_task(pump_logs_loop(ctx))
+        dispatcher = Dispatcher()
+        dispatcher.include_router(commands_router)
+        dispatcher["ctx"] = ctx
+
+        tasks = [
+            asyncio.create_task(
+                sol_price_loop(http, redis_client, settings.sol_price_interval)
+            ),
+            asyncio.create_task(pump_logs_loop(ctx)),
+            asyncio.create_task(outcomes_loop(ctx)),
+            asyncio.create_task(
+                dispatcher.start_polling(tg_bot, handle_signals=False)
+            ),
+        ]
 
         try:
-            await asyncio.gather(price_task, ws_task)
+            await asyncio.gather(*tasks)
         finally:
-            price_task.cancel()
-            ws_task.cancel()
+            for task in tasks:
+                task.cancel()
+            await ctx.stats.flush()
             await tg_bot.session.close()
             await redis_client.aclose()
 
