@@ -12,7 +12,7 @@ from .helius import HeliusClient
 log = logging.getLogger(__name__)
 
 SOL_MINT = "So11111111111111111111111111111111111111112"
-JUPITER_PRICE_URL = "https://lite-api.jup.ag/price/v2"
+JUPITER_PRICE_URL = "https://lite-api.jup.ag/price/v3"
 SOL_PRICE_KEY = "sol_price_usd"
 # Кэш живёт заметно дольше интервала обновления, чтобы пережить сбои Jupiter
 SOL_PRICE_TTL = 30
@@ -30,7 +30,7 @@ async def sol_price_loop(
                 timeout=aiohttp.ClientTimeout(total=5),
             ) as resp:
                 data = await resp.json()
-            price = float(data["data"][SOL_MINT]["price"])
+            price = float(data[SOL_MINT]["usdPrice"])
             await redis_client.set(SOL_PRICE_KEY, price, ex=SOL_PRICE_TTL)
         except (aiohttp.ClientError, asyncio.TimeoutError, KeyError, TypeError, ValueError) as exc:
             log.warning("Не удалось обновить цену SOL: %s", exc)
