@@ -59,14 +59,14 @@ class HeliusClient:
 
     # ----- Стандартные RPC-методы -----
 
-    async def get_account_lamports(self, address: str) -> Optional[int]:
-        """Свежий баланс аккаунта в лампортах."""
+    async def get_account_info(self, address: str) -> Optional[dict]:
+        """Свежие данные аккаунта: lamports и data (base64)."""
         result = await self.request(
             "getAccountInfo", [address, {"encoding": "base64", "commitment": "confirmed"}]
         )
-        if not result or not result.get("value"):
+        if not result:
             return None
-        return result["value"].get("lamports")
+        return result.get("value")
 
     async def get_signatures(self, address: str, limit: int = 1) -> list[dict]:
         result = await self.request(
