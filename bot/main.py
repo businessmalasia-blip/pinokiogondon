@@ -26,7 +26,7 @@ from .filters import calculate_human_percent, check_concentration, check_dev
 from .helius import HeliusClient
 from .jupiter import get_token_info, token_price
 from .outcomes import outcomes_loop
-from .prices import get_market_cap, sol_price_loop
+from .prices import get_market_cap, get_sol_price, sol_price_loop
 from .pump import find_buy_accounts, has_buy_log
 from .stats import Stats
 
@@ -58,10 +58,20 @@ async def wait_for_mc_range(ctx: Context, mint: str, bonding_curve: str) -> Opti
     не войдёт в диапазон [ALERT_MC_MIN, ALERT_MC_MAX] или не истечёт таймаут."""
     s = ctx.settings
     deadline = time.monotonic() + s.mc_wait_timeout
+    poll_count = 0
+    progress_every = max(1, int(30 / s.mc_poll_interval))
     while time.monotonic() < deadline:
         mc = await market_cap(ctx, bonding_curve)
         if mc is not None and s.alert_mc_min <= mc <= s.alert_mc_max:
+            log.info("[%s] 🎯 капа вошла в диапазон: $%.0f", mint, mc)
             return mc
+        poll_count += 1
+        if poll_count % progress_every == 0:
+            log.info(
+                "[%s] ⏳ жду диапазон $%.0f–$%.0f, сейчас MC %s",
+                mint, s.alert_mc_min, s.alert_mc_max,
+                f"${mc:,.0f}" if mc is not None else "н/д",
+            )
         await asyncio.sleep(s.mc_poll_interval)
     log.info("[%s] капа не вошла в диапазон за %.0f сек", mint, s.mc_wait_timeout)
     return None
@@ -73,30 +83,39 @@ async def wait_for_mc_range(ctx: Context, mint: str, bonding_curve: str) -> Opti
 
 async def analyze_token(ctx: Context, mint: str, bonding_curve: str) -> None:
     s = ctx.settings
-    log.info("[%s] запускаю анализ (bonding curve %s)", mint, bonding_curve)
+    log.info("[%s] 🔎 запускаю анализ (bonding curve %s)", mint, bonding_curve)
 
     # Фильтр 1: концентрация
     conc_ok, holders = await check_concentration(mint, ctx.helius, s)
     if not conc_ok:
+        log.info("[%s] ❌ ОТСЕЯН фильтром concentration", mint)
         await ctx.stats.record_filter_result(mint, "concentration")
         return
+    log.info("[%s] ✔ concentration пройден (%d холдеров)", mint, len(holders))
 
     # Фильтр 2: HUMAN-процент
     human_ok, human_percent = await calculate_human_percent(
-        holders, ctx.redis, ctx.helius, s
+        holders, ctx.redis, ctx.helius, s, mint
     )
     if not human_ok:
+        log.info("[%s] ❌ ОТСЕЯН фильтром human", mint)
         await ctx.stats.record_filter_result(mint, "human")
         return
+    log.info("[%s] ✔ human пройден (HUMAN %.0f%%)", mint, human_percent)
 
     # Фильтр 3: дев
     dev = await check_dev(mint, ctx.redis, ctx.helius, ctx.http, s)
     if dev["status"] == "Bad":
-        log.info("[%s] отсеян: Bad dev", mint)
+        log.info("[%s] ❌ ОТСЕЯН фильтром dev (Bad, MSR %s)", mint, dev["msr"])
         await ctx.stats.record_filter_result(mint, "dev")
         return
+    log.info("[%s] ✔ dev пройден (%s, MSR %s)", mint, dev["status"], dev["msr"])
 
     # Все три фильтра пройдены
+    log.info(
+        "[%s] 🎯 ВСЕ ФИЛЬТРЫ ПРОЙДЕНЫ — жду капу $%.0f–$%.0f",
+        mint, s.alert_mc_min, s.alert_mc_max,
+    )
     await ctx.stats.record_filter_result(mint, "passed")
 
     # Ждём входа капы в диапазон
@@ -156,8 +175,10 @@ async def handle_buy_signature(ctx: Context, signature: str) -> None:
         mc = await market_cap(ctx, bonding_curve)
         if mc is None or mc < s.mc_analyze_min:
             # Капа ещё мала — снимаем метку, чтобы следующий buy проверил снова
+            log.debug("[%s] MC $%.0f ниже порога $%.0f", mint, mc or 0, s.mc_analyze_min)
             await ctx.redis.delete(seen_key)
             return
+        log.info("[%s] 💵 MC $%.0f ≥ $%.0f — токен идёт на анализ", mint, mc, s.mc_analyze_min)
 
         try:
             await analyze_token(ctx, mint, bonding_curve)
@@ -212,6 +233,46 @@ async def pump_logs_loop(ctx: Context) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Минутный "пульс" в лог: цена SOL и статистика за минуту
+# ---------------------------------------------------------------------------
+
+HEARTBEAT_INTERVAL = 60
+
+
+async def heartbeat_loop(ctx: Context) -> None:
+    prev: dict[str, int] = {}
+    while True:
+        await asyncio.sleep(HEARTBEAT_INTERVAL)
+        try:
+            counters = await ctx.stats.counters()
+            sol_price = await get_sol_price(ctx.redis)
+
+            def delta(field: str) -> int:
+                return counters.get(field, 0) - prev.get(field, 0)
+
+            log.info(
+                "💓 SOL $%s | за минуту: событий %d, покупок %d, tx %d, "
+                "расчётов капы %d | отсеяно: conc %d, human %d, dev %d | "
+                "прошло %d | алертов всего %d",
+                f"{sol_price:.2f}" if sol_price else "?",
+                delta("events_received"),
+                delta("buys_seen"),
+                delta("tx_checked"),
+                delta("mc_calcs"),
+                delta("filtered:concentration"),
+                delta("filtered:human"),
+                delta("filtered:dev"),
+                delta("filtered:passed"),
+                counters.get("alerts_sent", 0),
+            )
+            prev = counters
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Ошибка heartbeat")
+
+
+# ---------------------------------------------------------------------------
 # Запуск
 # ---------------------------------------------------------------------------
 
@@ -262,6 +323,7 @@ async def run() -> None:
             ),
             asyncio.create_task(pump_logs_loop(ctx)),
             asyncio.create_task(outcomes_loop(ctx)),
+            asyncio.create_task(heartbeat_loop(ctx)),
             asyncio.create_task(
                 dispatcher.start_polling(tg_bot, handle_signals=False)
             ),

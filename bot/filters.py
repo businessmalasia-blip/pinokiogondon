@@ -93,6 +93,7 @@ async def calculate_human_percent(
     redis_client: Redis,
     helius: HeliusClient,
     settings: Settings,
+    mint: str = "",
 ) -> tuple[bool, float]:
     """HUMAN — у адреса есть история транзакций; UNKNOWN — истории нет.
 
@@ -130,8 +131,10 @@ async def calculate_human_percent(
         and unknown_percent <= settings.unknown_max_percent
     )
     log.info(
-        "HUMAN %.1f%% / UNKNOWN %.1f%% (%d холдеров) -> %s",
-        human_percent, unknown_percent, total, "OK" if passed else "FAIL",
+        "[%s] human: HUMAN %.1f%% / UNKNOWN %.1f%% (%d холдеров, пороги ≥%.0f/≤%.0f) -> %s",
+        mint, human_percent, unknown_percent, total,
+        settings.human_min_percent, settings.unknown_max_percent,
+        "OK" if passed else "FAIL",
     )
     return passed, human_percent
 

@@ -134,7 +134,7 @@ async def cmd_settings(message: Message, ctx) -> None:
         f"Капа для анализа: ≥ ${s.mc_analyze_min:,.0f}\n"
         f"Диапазон алерта: ${s.alert_mc_min:,.0f}–${s.alert_mc_max:,.0f}\n"
         f"Guard при отправке: ${s.send_guard_mc_min:,.0f}–${s.send_guard_mc_max:,.0f}\n"
-        f"Холдер: ≤ {s.holder_max_percent}% | Топ-10: < {s.top10_max_percent}%\n"
+        f"Холдер: ≤ {s.holder_max_percent}% | Топ-10: &lt; {s.top10_max_percent}%\n"
         f"HUMAN: ≥ {s.human_min_percent:.0f}% | UNKNOWN: ≤ {s.unknown_max_percent:.0f}%\n"
         f"MSR: ≥ {s.msr_min_percent:.0f}% (мин. {s.dev_min_tokens} токенов, "
         f"{s.dev_history_days} дн.)\n"
