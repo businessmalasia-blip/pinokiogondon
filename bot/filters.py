@@ -21,11 +21,12 @@ log = logging.getLogger(__name__)
 
 async def check_concentration(
     mint: str, helius: HeliusClient, settings: Settings
-) -> tuple[bool, list[str]]:
+) -> tuple[bool, list[tuple[str, float]]]:
     """Проверка распределения supply по топ-100 держателей.
 
-    Возвращает (прошёл ли фильтр, список адресов холдеров без bonding curve).
-    Список холдеров отдаётся наружу, чтобы фильтр HUMAN не запрашивал их повторно.
+    Возвращает (прошёл ли фильтр, список холдеров без bonding curve).
+    Холдеры — пары (адрес, доля в %) по убыванию доли; отдаются наружу,
+    чтобы фильтр HUMAN не запрашивал их повторно.
     """
     supply_info = await helius.get_token_supply(mint)
     if not supply_info or supply_info[0] <= 0:
@@ -60,7 +61,6 @@ async def check_concentration(
         for owner, share in shares
         if share <= settings.bonding_curve_exclude_percent
     ]
-    holder_addresses = [owner for owner, _ in filtered]
 
     if not filtered:
         return False, []
@@ -69,19 +69,19 @@ async def check_concentration(
     max_share = max(share for _, share in filtered)
     if max_share > settings.holder_max_percent:
         log.info("[%s] concentration: холдер держит %.2f%%", mint, max_share)
-        return False, holder_addresses
+        return False, filtered
 
     # Сумма топ-10 меньше TOP10_MAX_PERCENT
     top10_sum = sum(share for _, share in filtered[:10])
     if top10_sum >= settings.top10_max_percent:
         log.info("[%s] concentration: топ-10 держат %.2f%%", mint, top10_sum)
-        return False, holder_addresses
+        return False, filtered
 
     log.info(
         "[%s] concentration OK: max %.2f%%, топ-10 %.2f%%",
         mint, max_share, top10_sum,
     )
-    return True, holder_addresses
+    return True, filtered
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +89,7 @@ async def check_concentration(
 # ---------------------------------------------------------------------------
 
 async def calculate_human_percent(
-    holders: list[str],
+    holders: list[tuple[str, float]],
     redis_client: Redis,
     helius: HeliusClient,
     settings: Settings,
@@ -97,30 +97,44 @@ async def calculate_human_percent(
 ) -> tuple[bool, float]:
     """HUMAN — у адреса есть история транзакций; UNKNOWN — истории нет.
 
-    Возвращает (прошёл ли фильтр, HUMAN-процент для алерта).
+    Для экономии кредитов Helius проверяются только топ-HUMAN_CHECK_TOP
+    холдеров по балансу, адреса с долей меньше HUMAN_MIN_HOLDER_SHARE
+    игнорируются. Некэшированные адреса запрашиваются batch-запросами
+    по 10 штук. Возвращает (прошёл ли фильтр, HUMAN-процент для алерта).
     """
-    if not holders:
+    candidates = [
+        address
+        for address, share in holders[: settings.human_check_top]
+        if share >= settings.human_min_holder_share
+    ]
+    if not candidates:
+        log.info("[%s] human: нет холдеров с долей ≥%.2f%%", mint, settings.human_min_holder_share)
         return False, 0.0
 
     human = 0
     unknown = 0
-    for address in holders:
-        cache_key = f"human:{address}"
-        cached = await redis_client.get(cache_key)
-        if cached is not None:
-            if cached == "1":
+    to_query: list[str] = []
+    for address in candidates:
+        cached = await redis_client.get(f"human:{address}")
+        if cached == "1":
+            human += 1
+        elif cached == "0":
+            unknown += 1
+        else:
+            to_query.append(address)
+
+    for start in range(0, len(to_query), 10):
+        chunk = to_query[start : start + 10]
+        signatures_by_address = await helius.get_signatures_batch(chunk, limit=1)
+        pipe = redis_client.pipeline()
+        for address in chunk:
+            if signatures_by_address.get(address):
                 human += 1
+                pipe.set(f"human:{address}", "1", ex=settings.human_cache_ttl)
             else:
                 unknown += 1
-            continue
-
-        signatures = await helius.get_signatures(address, limit=1)
-        if signatures:
-            human += 1
-            await redis_client.set(cache_key, "1", ex=settings.human_cache_ttl)
-        else:
-            unknown += 1
-            await redis_client.set(cache_key, "0", ex=settings.unknown_cache_ttl)
+                pipe.set(f"human:{address}", "0", ex=settings.unknown_cache_ttl)
+        await pipe.execute()
 
     total = human + unknown
     human_percent = human / total * 100.0

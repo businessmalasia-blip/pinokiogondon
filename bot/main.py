@@ -190,6 +190,14 @@ async def handle_buy_signature(ctx: Context, signature: str) -> None:
 # WebSocket-подписка на логи программы Pump.fun
 # ---------------------------------------------------------------------------
 
+# Бэкофф переподключения: 1с -> 2с -> 4с -> 8с -> 16с -> максимум 30с
+WS_RECONNECT_DELAY_INITIAL = 1.0
+WS_RECONNECT_DELAY_MAX = 30.0
+# Если за это время не пришло ни одного события — подписка "тихо" умерла,
+# соединение принудительно пересоздаётся (поток Pump.fun не молчит так долго)
+WS_IDLE_TIMEOUT = 60.0
+
+
 async def pump_logs_loop(ctx: Context) -> None:
     s = ctx.settings
     subscribe_request = json.dumps(
@@ -203,14 +211,31 @@ async def pump_logs_loop(ctx: Context) -> None:
             ],
         }
     )
+    delay = WS_RECONNECT_DELAY_INITIAL
+    attempt = 0
     while True:
+        attempt += 1
         try:
+            log.info("WebSocket: попытка подключения #%d...", attempt)
             async with websockets.connect(
-                s.rpc_ws_url, ping_interval=20, ping_timeout=20, max_size=None
+                s.rpc_ws_url,
+                ping_interval=20,
+                ping_timeout=20,
+                open_timeout=15,
+                close_timeout=5,
+                max_size=None,
             ) as ws:
                 await ws.send(subscribe_request)
-                log.info("WebSocket подключён, подписка на %s", s.pump_program)
-                async for raw in ws:
+                log.info(
+                    "WebSocket подключён (попытка #%d), подписка на %s",
+                    attempt, s.pump_program,
+                )
+                # Успешное подключение — сбрасываем бэкофф и счётчик попыток
+                delay = WS_RECONNECT_DELAY_INITIAL
+                attempt = 0
+
+                while True:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=WS_IDLE_TIMEOUT)
                     message = json.loads(raw)
                     if message.get("method") != "logsNotification":
                         continue
@@ -227,9 +252,19 @@ async def pump_logs_loop(ctx: Context) -> None:
                     )
         except asyncio.CancelledError:
             raise
+        except asyncio.TimeoutError:
+            log.warning(
+                "WebSocket: нет событий %d сек — подписка зависла, "
+                "reconnecting in %.0f seconds...",
+                WS_IDLE_TIMEOUT, delay,
+            )
         except Exception as exc:
-            log.warning("WebSocket отвалился (%s), переподключение через 3 сек", exc)
-            await asyncio.sleep(3)
+            log.warning(
+                "WebSocket disconnected (%s: %s), reconnecting in %.0f seconds...",
+                type(exc).__name__, exc, delay,
+            )
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, WS_RECONNECT_DELAY_MAX)
 
 
 # ---------------------------------------------------------------------------

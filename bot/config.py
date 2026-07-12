@@ -53,6 +53,8 @@ class Settings:
     unknown_max_percent: float
     human_cache_ttl: int
     unknown_cache_ttl: int
+    human_check_top: int
+    human_min_holder_share: float
 
     # Фильтр 3: дев
     msr_min_percent: float
@@ -95,16 +97,18 @@ def load_settings() -> Settings:
         mc_poll_interval=float(os.getenv("MC_POLL_INTERVAL", "2")),
         mc_wait_timeout=float(os.getenv("MC_WAIT_TIMEOUT", "900")),
         sol_price_interval=float(os.getenv("SOL_PRICE_INTERVAL", "2")),
-        helius_rate_limit=float(os.getenv("HELIUS_RATE_LIMIT", "0.2")),
+        helius_rate_limit=float(os.getenv("HELIUS_RATE_LIMIT", "0.25")),
         bonding_curve_exclude_percent=float(
             os.getenv("BONDING_CURVE_EXCLUDE_PERCENT", "50")
         ),
         holder_max_percent=float(os.getenv("HOLDER_MAX_PERCENT", "2.5")),
         top10_max_percent=float(os.getenv("TOP10_MAX_PERCENT", "15")),
-        human_min_percent=float(os.getenv("HUMAN_MIN_PERCENT", "60")),
-        unknown_max_percent=float(os.getenv("UNKNOWN_MAX_PERCENT", "20")),
+        human_min_percent=float(os.getenv("HUMAN_MIN_PERCENT", "45")),
+        unknown_max_percent=float(os.getenv("UNKNOWN_MAX_PERCENT", "30")),
         human_cache_ttl=int(os.getenv("HUMAN_CACHE_TTL", "3600")),
-        unknown_cache_ttl=int(os.getenv("UNKNOWN_CACHE_TTL", "300")),
+        unknown_cache_ttl=int(os.getenv("UNKNOWN_CACHE_TTL", "3600")),
+        human_check_top=int(os.getenv("HUMAN_CHECK_TOP", "30")),
+        human_min_holder_share=float(os.getenv("HUMAN_MIN_HOLDER_SHARE", "0.5")),
         msr_min_percent=float(os.getenv("MSR_MIN_PERCENT", "70")),
         dev_min_tokens=int(os.getenv("DEV_MIN_TOKENS", "3")),
         dev_history_days=int(os.getenv("DEV_HISTORY_DAYS", "30")),

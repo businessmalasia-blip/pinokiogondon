@@ -24,6 +24,8 @@ class HeliusClient:
         self._lock = asyncio.Lock()
         self._last_request_at = 0.0
         self._id_counter = itertools.count(1)
+        # None — ещё не знаем; False — тариф Helius отверг batch, ходим одиночными
+        self._batch_supported: Optional[bool] = None
 
     async def _throttle(self) -> None:
         """Гарантирует паузу между любыми запросами к Helius."""
@@ -57,6 +59,62 @@ class HeliusClient:
             return None
         return data.get("result")
 
+    async def _sequential_fallback(self, requests: list[tuple[str, Any]]) -> list[Any]:
+        """Одиночные вызовы через общий rate limiter (пауза перед каждым)."""
+        return [await self.request(method, params) for method, params in requests]
+
+    async def batch_request(self, requests: list[tuple[str, Any]]) -> list[Any]:
+        """JSON-RPC batch: несколько вызовов в одном HTTP-запросе.
+
+        Проходит через тот же rate limiter одной паузой на весь батч.
+        Бесплатный тариф Helius отвергает батчи ("max usage reached") —
+        в этом случае клиент запоминает это и дальше ходит одиночными
+        запросами с обычным rate limiting.
+        Возвращает результаты в порядке запросов (None для ошибочных).
+        """
+        if not requests:
+            return []
+        if self._batch_supported is False:
+            return await self._sequential_fallback(requests)
+
+        await self._throttle()
+        payload = [
+            {"jsonrpc": "2.0", "id": i, "method": method, "params": params}
+            for i, (method, params) in enumerate(requests)
+        ]
+        try:
+            async with self._session.post(
+                self._rpc_url,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                data = await resp.json()
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            log.warning("Helius batch (%d вызовов): сетевая ошибка: %s", len(requests), exc)
+            return [None] * len(requests)
+
+        if isinstance(data, dict):
+            # Сервер ответил одним объектом-ошибкой — батчи на тарифе запрещены
+            log.info(
+                "Helius batch отклонён тарифом (%s) — переключаюсь на одиночные запросы",
+                (data.get("error") or {}).get("message", "?"),
+            )
+            self._batch_supported = False
+            return await self._sequential_fallback(requests)
+        if not isinstance(data, list):
+            log.warning("Helius batch: неожиданный ответ: %s", str(data)[:200])
+            return [None] * len(requests)
+
+        self._batch_supported = True
+        by_id = {item.get("id"): item for item in data if isinstance(item, dict)}
+        results: list[Any] = []
+        for i in range(len(requests)):
+            item = by_id.get(i, {})
+            if "error" in item:
+                log.warning("Helius batch #%d: ошибка RPC: %s", i, item["error"])
+            results.append(item.get("result"))
+        return results
+
     # ----- Стандартные RPC-методы -----
 
     async def get_account_info(self, address: str) -> Optional[dict]:
@@ -74,6 +132,17 @@ class HeliusClient:
             [address, {"limit": limit, "commitment": "confirmed"}],
         )
         return result or []
+
+    async def get_signatures_batch(
+        self, addresses: list[str], limit: int = 1
+    ) -> dict[str, list]:
+        """getSignaturesForAddress для нескольких адресов одним batch-запросом."""
+        requests = [
+            ("getSignaturesForAddress", [address, {"limit": limit, "commitment": "confirmed"}])
+            for address in addresses
+        ]
+        results = await self.batch_request(requests)
+        return {address: (result or []) for address, result in zip(addresses, results)}
 
     async def get_transaction(self, signature: str) -> Optional[dict]:
         return await self.request(
