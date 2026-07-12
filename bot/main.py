@@ -86,7 +86,7 @@ async def analyze_token(ctx: Context, mint: str, bonding_curve: str) -> None:
     log.info("[%s] 🔎 запускаю анализ (bonding curve %s)", mint, bonding_curve)
 
     # Фильтр 1: концентрация
-    conc_ok, holders = await check_concentration(mint, ctx.helius, s)
+    conc_ok, holders = await check_concentration(mint, ctx.helius, s, bonding_curve)
     if not conc_ok:
         log.info("[%s] ❌ ОТСЕЯН фильтром concentration", mint)
         await ctx.stats.record_filter_result(mint, "concentration")
@@ -177,6 +177,11 @@ async def handle_buy_signature(ctx: Context, signature: str) -> None:
             # Капа ещё мала — снимаем метку, чтобы следующий buy проверил снова
             log.debug("[%s] MC $%.0f ниже порога $%.0f", mint, mc or 0, s.mc_analyze_min)
             await ctx.redis.delete(seen_key)
+            return
+        if s.mc_analyze_max > 0 and mc > s.mc_analyze_max:
+            # Токен уже улетел выше guard-диапазона — анализ не окупится,
+            # алерт всё равно не отправится (метку не снимаем)
+            log.debug("[%s] MC $%.0f выше потолка $%.0f", mint, mc, s.mc_analyze_max)
             return
         log.info("[%s] 💵 MC $%.0f ≥ $%.0f — токен идёт на анализ", mint, mc, s.mc_analyze_min)
 
@@ -275,7 +280,12 @@ HEARTBEAT_INTERVAL = 60
 
 
 async def heartbeat_loop(ctx: Context) -> None:
-    prev: dict[str, int] = {}
+    # Стартуем от текущих значений, иначе первый пульс покажет
+    # накопленные за всё время суммы вместо статистики за минуту
+    try:
+        prev: dict[str, int] = await ctx.stats.counters()
+    except Exception:
+        prev = {}
     while True:
         await asyncio.sleep(HEARTBEAT_INTERVAL)
         try:

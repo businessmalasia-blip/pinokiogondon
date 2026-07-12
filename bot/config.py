@@ -30,6 +30,7 @@ class Settings:
 
     # Market cap
     mc_analyze_min: float
+    mc_analyze_max: float
     alert_mc_min: float
     alert_mc_max: float
     send_guard_mc_min: float
@@ -90,6 +91,7 @@ def load_settings() -> Settings:
         buy_mint_index=int(os.getenv("BUY_MINT_INDEX", "2")),
         buy_bonding_curve_index=int(os.getenv("BUY_BONDING_CURVE_INDEX", "3")),
         mc_analyze_min=float(os.getenv("MC_ANALYZE_MIN", "8000")),
+        mc_analyze_max=float(os.getenv("MC_ANALYZE_MAX", "13000")),
         alert_mc_min=float(os.getenv("ALERT_MC_MIN", "10000")),
         alert_mc_max=float(os.getenv("ALERT_MC_MAX", "12000")),
         send_guard_mc_min=float(os.getenv("SEND_GUARD_MC_MIN", "9000")),

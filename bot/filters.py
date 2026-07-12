@@ -20,13 +20,20 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 async def check_concentration(
-    mint: str, helius: HeliusClient, settings: Settings
+    mint: str,
+    helius: HeliusClient,
+    settings: Settings,
+    bonding_curve: str = "",
 ) -> tuple[bool, list[tuple[str, float]]]:
     """Проверка распределения supply по топ-100 держателей.
 
     Возвращает (прошёл ли фильтр, список холдеров без bonding curve).
     Холдеры — пары (адрес, доля в %) по убыванию доли; отдаются наружу,
     чтобы фильтр HUMAN не запрашивал их повторно.
+
+    Bonding curve исключается в первую очередь по адресу владельца:
+    при капе выше ~$7k кривая держит меньше 50% supply и порог по доле
+    её уже не ловит. Порог >50% остаётся страховкой.
     """
     supply_info = await helius.get_token_supply(mint)
     if not supply_info or supply_info[0] <= 0:
@@ -55,11 +62,11 @@ async def check_concentration(
     shares = [(owner, amount / raw_supply * 100.0) for owner, amount in holders]
     shares.sort(key=lambda item: item[1], reverse=True)
 
-    # Исключаем bonding curve: аккаунт с долей выше порога (по ТЗ >50%)
+    # Исключаем bonding curve: по адресу владельца и (страховкой) по доле >50%
     filtered = [
         (owner, share)
         for owner, share in shares
-        if share <= settings.bonding_curve_exclude_percent
+        if owner != bonding_curve and share <= settings.bonding_curve_exclude_percent
     ]
 
     if not filtered:
