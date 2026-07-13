@@ -80,6 +80,10 @@ class Settings:
     # Прочее
     seen_mint_ttl: int
     max_concurrent_analyses: int
+    candidate_queue_size: int
+    das_min_accounts: int
+    das_retry_delay: float
+    das_retries: int
     log_level: str
 
     @property
@@ -139,5 +143,9 @@ def load_settings() -> Settings:
         survivor_min_volume_usd=float(os.getenv("SURVIVOR_MIN_VOLUME_USD", "1000")),
         seen_mint_ttl=int(os.getenv("SEEN_MINT_TTL", "3600")),
         max_concurrent_analyses=int(os.getenv("MAX_CONCURRENT_ANALYSES", "3")),
+        candidate_queue_size=int(os.getenv("CANDIDATE_QUEUE_SIZE", "100")),
+        das_min_accounts=int(os.getenv("DAS_MIN_ACCOUNTS", "15")),
+        das_retry_delay=float(os.getenv("DAS_RETRY_DELAY", "12")),
+        das_retries=int(os.getenv("DAS_RETRIES", "2")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
     )

@@ -1,5 +1,6 @@
 """Три фильтра анализа токена: концентрация, HUMAN-процент, история дева."""
 
+import asyncio
 import logging
 import time
 from typing import Optional
@@ -42,9 +43,23 @@ async def check_concentration(
         return False, [], 0.0
     raw_supply, _decimals = supply_info
 
+    # DAS индексирует свежесозданные токены с задержкой: если аккаунтов
+    # подозрительно мало, ждём и перечитываем, а не верим обрубку списка
     accounts = await helius.get_token_accounts(mint, limit=100)
-    if not accounts:
-        log.info("[%s] concentration: нет токен-аккаунтов", mint)
+    attempts = 0
+    while len(accounts) < settings.das_min_accounts and attempts < settings.das_retries:
+        attempts += 1
+        log.info(
+            "[%s] concentration: DAS вернул %d аккаунтов — жду индексацию (%d/%d)",
+            mint, len(accounts), attempts, settings.das_retries,
+        )
+        await asyncio.sleep(settings.das_retry_delay)
+        accounts = await helius.get_token_accounts(mint, limit=100)
+    if len(accounts) < settings.das_min_accounts:
+        log.info(
+            "[%s] concentration: DAS так и вернул %d аккаунтов — данные неполные",
+            mint, len(accounts),
+        )
         return False, [], 0.0
 
     # DAS getTokenAccounts и getTokenSupply оба отдают amount в сырых единицах,

@@ -21,9 +21,13 @@ SOL_PRICE_TTL = 30
 
 
 async def sol_price_loop(
-    session: aiohttp.ClientSession, redis_client: Redis, interval: float
+    session: aiohttp.ClientSession,
+    redis_client: Redis,
+    interval: float,
+    price_holder=None,
 ) -> None:
-    """Фоновая задача: раз в `interval` секунд обновляет цену SOL в Redis."""
+    """Фоновая задача: раз в `interval` секунд обновляет цену SOL в Redis
+    и в price_holder.sol_price (для расчётов без обращения к Redis)."""
     while True:
         try:
             async with session.get(
@@ -34,6 +38,8 @@ async def sol_price_loop(
                 data = await resp.json()
             price = float(data[SOL_MINT]["usdPrice"])
             await redis_client.set(SOL_PRICE_KEY, price, ex=SOL_PRICE_TTL)
+            if price_holder is not None:
+                price_holder.sol_price = price
         except (aiohttp.ClientError, asyncio.TimeoutError, KeyError, TypeError, ValueError) as exc:
             log.warning("Не удалось обновить цену SOL: %s", exc)
         await asyncio.sleep(interval)

@@ -33,7 +33,7 @@ from .helius import HeliusClient
 from .jupiter import get_token_info, token_price
 from .outcomes import outcomes_loop
 from .prices import get_market_cap, get_sol_price, sol_price_loop
-from .pump import find_buy_accounts, has_buy_log
+from .pump import find_buy_accounts, iter_trade_events, market_cap_from_reserves
 from .stats import Stats
 
 log = logging.getLogger("bot")
@@ -47,7 +47,8 @@ class Context:
     http: aiohttp.ClientSession
     tg_bot: Bot
     stats: Stats
-    analysis_semaphore: asyncio.Semaphore
+    candidate_queue: asyncio.Queue
+    sol_price: Optional[float] = None
 
 
 async def market_cap(ctx: Context, bonding_curve: str) -> Optional[float]:
@@ -253,45 +254,73 @@ async def resume_pending_alerts(ctx: Context) -> None:
         asyncio.create_task(wait_and_alert(ctx, mint, bonding_curve, alert_data))
 
 
-async def handle_buy_signature(ctx: Context, signature: str) -> None:
-    """Обработка транзакции с инструкцией buy: извлечение mint/bonding curve,
-    проверка капы и запуск анализа."""
+def screen_buy_events(ctx: Context, logs: list[str]) -> list[tuple[str, float]]:
+    """Скрининг покупок прямо из логов события — ноль RPC-запросов.
+
+    Из строк "Program data:" достаются TradeEvent'ы (mint + резервы кривой),
+    капа считается по резервам и кэшированной цене SOL. Возвращает список
+    (mint, mc) токенов, чья капа попала в рабочий диапазон.
+    """
     s = ctx.settings
-    async with ctx.analysis_semaphore:
-        tx = await ctx.helius.get_transaction(signature)
-        if not tx or (tx.get("meta") or {}).get("err"):
-            return
-        ctx.stats.bump("tx_checked")
-
-        parsed = find_buy_accounts(
-            tx, s.pump_program, s.buy_mint_index, s.buy_bonding_curve_index
+    sol_price = ctx.sol_price
+    if sol_price is None:
+        return []
+    candidates = []
+    seen_in_tx: set[str] = set()
+    for event in iter_trade_events(logs):
+        if not event["is_buy"]:
+            continue
+        if not seen_in_tx:
+            ctx.stats.bump("buys_seen")
+        if event["mint"] in seen_in_tx:
+            continue
+        seen_in_tx.add(event["mint"])
+        mc = market_cap_from_reserves(
+            event["virtual_sol_reserves"], event["virtual_token_reserves"], sol_price
         )
-        if not parsed:
-            return
-        mint, bonding_curve = parsed
-
-        # Дедупликация: один mint анализируем один раз за SEEN_MINT_TTL
-        seen_key = f"seen:{mint}"
-        if not await ctx.redis.set(seen_key, "1", ex=s.seen_mint_ttl, nx=True):
-            return
-
-        mc = await market_cap(ctx, bonding_curve)
+        ctx.stats.bump("mc_calcs")
         if mc is None or mc < s.mc_analyze_min:
-            # Капа ещё мала — снимаем метку, чтобы следующий buy проверил снова
-            log.debug("[%s] MC $%.0f ниже порога $%.0f", mint, mc or 0, s.mc_analyze_min)
-            await ctx.redis.delete(seen_key)
-            return
+            continue
         if s.mc_analyze_max > 0 and mc > s.mc_analyze_max:
-            # Токен уже улетел выше guard-диапазона — анализ не окупится,
-            # алерт всё равно не отправится (метку не снимаем)
-            log.debug("[%s] MC $%.0f выше потолка $%.0f", mint, mc, s.mc_analyze_max)
-            return
-        log.info("[%s] 💵 MC $%.0f ≥ $%.0f — токен идёт на анализ", mint, mc, s.mc_analyze_min)
+            continue
+        candidates.append((event["mint"], mc))
+    return candidates
 
+
+async def candidate_worker(ctx: Context) -> None:
+    """Воркер полного анализа: берёт кандидатов из ограниченной очереди.
+
+    Только здесь тратятся RPC-запросы: одна getTransaction на кандидата
+    (ради адреса bonding curve), дальше обычный пайплайн фильтров.
+    """
+    s = ctx.settings
+    while True:
+        signature, mint, event_mc = await ctx.candidate_queue.get()
         try:
+            log.info(
+                "[%s] 💵 MC $%.0f (из события) в диапазоне — токен идёт на анализ",
+                mint, event_mc,
+            )
+            tx = await ctx.helius.get_transaction(signature)
+            if not tx or (tx.get("meta") or {}).get("err"):
+                await ctx.redis.delete(f"seen:{mint}")
+                continue
+            ctx.stats.bump("tx_checked")
+            parsed = find_buy_accounts(
+                tx, s.pump_program, s.buy_mint_index, s.buy_bonding_curve_index,
+                target_mint=mint,
+            )
+            if not parsed:
+                await ctx.redis.delete(f"seen:{mint}")
+                continue
+            _, bonding_curve = parsed
             await analyze_token(ctx, mint, bonding_curve)
+        except asyncio.CancelledError:
+            raise
         except Exception:
             log.exception("[%s] ошибка анализа", mint)
+        finally:
+            ctx.candidate_queue.task_done()
 
 
 # ---------------------------------------------------------------------------
@@ -352,12 +381,24 @@ async def pump_logs_loop(ctx: Context) -> None:
                     value = message["params"]["result"]["value"]
                     if value.get("err"):
                         continue
-                    if not has_buy_log(value.get("logs") or []):
-                        continue
-                    ctx.stats.bump("buys_seen")
-                    asyncio.create_task(
-                        handle_buy_signature(ctx, value["signature"])
-                    )
+
+                    candidates = screen_buy_events(ctx, value.get("logs") or [])
+                    for mint, mc in candidates:
+                        # Дедуп до постановки в очередь: один mint — один анализ
+                        seen_key = f"seen:{mint}"
+                        if not await ctx.redis.set(
+                            seen_key, "1", ex=s.seen_mint_ttl, nx=True
+                        ):
+                            continue
+                        try:
+                            ctx.candidate_queue.put_nowait(
+                                (value["signature"], mint, mc)
+                            )
+                        except asyncio.QueueFull:
+                            # Очередь ограничена — излишек сбрасываем, метку
+                            # снимаем, чтобы следующая покупка вернула токен
+                            ctx.stats.bump("queue_dropped")
+                            await ctx.redis.delete(seen_key)
         except asyncio.CancelledError:
             raise
         except asyncio.TimeoutError:
@@ -399,18 +440,19 @@ async def heartbeat_loop(ctx: Context) -> None:
                 return counters.get(field, 0) - prev.get(field, 0)
 
             log.info(
-                "💓 SOL $%s | за минуту: событий %d, покупок %d, tx %d, "
-                "расчётов капы %d | отсеяно: conc %d, human %d, dev %d | "
-                "прошло %d | алертов всего %d",
+                "💓 SOL $%s | за минуту: событий %d, покупок %d, капа из событий %d, "
+                "tx %d | отсеяно: conc %d, score %d | прошло %d | "
+                "очередь %d (сброшено %d) | алертов всего %d",
                 f"{sol_price:.2f}" if sol_price else "?",
                 delta("events_received"),
                 delta("buys_seen"),
-                delta("tx_checked"),
                 delta("mc_calcs"),
+                delta("tx_checked"),
                 delta("filtered:concentration"),
-                delta("filtered:human"),
-                delta("filtered:dev"),
+                delta("filtered:score"),
                 delta("filtered:passed"),
+                ctx.candidate_queue.qsize(),
+                delta("queue_dropped"),
                 counters.get("alerts_sent", 0),
             )
             prev = counters
@@ -455,7 +497,7 @@ async def run() -> None:
             http=http,
             tg_bot=tg_bot,
             stats=Stats(redis_client),
-            analysis_semaphore=asyncio.Semaphore(settings.max_concurrent_analyses),
+            candidate_queue=asyncio.Queue(maxsize=settings.candidate_queue_size),
         )
 
         await tg_bot.set_my_commands(BOT_COMMANDS)
@@ -468,7 +510,9 @@ async def run() -> None:
 
         tasks = [
             asyncio.create_task(
-                sol_price_loop(http, redis_client, settings.sol_price_interval)
+                sol_price_loop(
+                    http, redis_client, settings.sol_price_interval, price_holder=ctx
+                )
             ),
             asyncio.create_task(pump_logs_loop(ctx)),
             asyncio.create_task(outcomes_loop(ctx)),
@@ -476,6 +520,10 @@ async def run() -> None:
             asyncio.create_task(
                 dispatcher.start_polling(tg_bot, handle_signals=False)
             ),
+        ]
+        tasks += [
+            asyncio.create_task(candidate_worker(ctx))
+            for _ in range(settings.max_concurrent_analyses)
         ]
 
         try:
