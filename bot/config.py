@@ -37,6 +37,7 @@ class Settings:
     send_guard_mc_max: float
     mc_poll_interval: float
     mc_wait_timeout: float
+    mc_wait_abort_below: float
 
     # Цена SOL
     sol_price_interval: float
@@ -56,6 +57,7 @@ class Settings:
     unknown_cache_ttl: int
     human_check_top: int
     human_min_holder_share: float
+    human_min_candidates: int
 
     # Бандлы
     max_bundle_percent: float
@@ -109,6 +111,7 @@ def load_settings() -> Settings:
         send_guard_mc_max=float(os.getenv("SEND_GUARD_MC_MAX", "13000")),
         mc_poll_interval=float(os.getenv("MC_POLL_INTERVAL", "2")),
         mc_wait_timeout=float(os.getenv("MC_WAIT_TIMEOUT", "900")),
+        mc_wait_abort_below=float(os.getenv("MC_WAIT_ABORT_BELOW", "6000")),
         sol_price_interval=float(os.getenv("SOL_PRICE_INTERVAL", "2")),
         helius_rate_limit=float(os.getenv("HELIUS_RATE_LIMIT", "0.25")),
         bonding_curve_exclude_percent=float(
@@ -122,6 +125,7 @@ def load_settings() -> Settings:
         unknown_cache_ttl=int(os.getenv("UNKNOWN_CACHE_TTL", "3600")),
         human_check_top=int(os.getenv("HUMAN_CHECK_TOP", "30")),
         human_min_holder_share=float(os.getenv("HUMAN_MIN_HOLDER_SHARE", "0.5")),
+        human_min_candidates=int(os.getenv("HUMAN_MIN_CANDIDATES", "10")),
         max_bundle_percent=float(os.getenv("MAX_BUNDLE_PERCENT", "25")),
         bundle_slot_min_txs=int(os.getenv("BUNDLE_SLOT_MIN_TXS", "3")),
         min_score=float(os.getenv("MIN_SCORE", "7.5")),

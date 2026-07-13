@@ -71,6 +71,16 @@ async def wait_for_mc_range(ctx: Context, mint: str, bonding_curve: str) -> Opti
         if mc is not None and s.alert_mc_min <= mc <= s.alert_mc_max:
             log.info("[%s] 🎯 капа вошла в диапазон: $%.0f", mint, mc)
             return mc
+        if (
+            mc is not None
+            and s.mc_wait_abort_below > 0
+            and mc < s.mc_wait_abort_below
+        ):
+            log.info(
+                "[%s] 🛑 ожидание прервано: капа $%.0f упала ниже $%.0f — токен слит",
+                mint, mc, s.mc_wait_abort_below,
+            )
+            return None
         poll_count += 1
         if poll_count % progress_every == 0:
             log.info(

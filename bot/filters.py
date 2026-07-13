@@ -111,13 +111,24 @@ async def calculate_human_percent(
     игнорируются. Некэшированные адреса запрашиваются batch-запросами
     по 10 штук. Возвращает (прошёл ли фильтр, HUMAN-процент для алерта).
     """
+    top = holders[: settings.human_check_top]
     candidates = [
-        address
-        for address, share in holders[: settings.human_check_top]
+        address for address, share in top
         if share >= settings.human_min_holder_share
     ]
+    # У хорошо распределённых токенов почти все доли ниже отсечки, и выборка
+    # вырождается в 2-4 кошелька. Добираем следующими по размеру холдерами,
+    # чтобы процент считался минимум по HUMAN_MIN_CANDIDATES адресам.
+    if len(candidates) < settings.human_min_candidates:
+        seen = set(candidates)
+        for address, _share in top:
+            if len(candidates) >= settings.human_min_candidates:
+                break
+            if address not in seen:
+                candidates.append(address)
+                seen.add(address)
     if not candidates:
-        log.info("[%s] human: нет холдеров с долей ≥%.2f%%", mint, settings.human_min_holder_share)
+        log.info("[%s] human: нет холдеров для проверки", mint)
         return False, 0.0
 
     human = 0
