@@ -25,11 +25,12 @@ async def check_concentration(
     helius: HeliusClient,
     settings: Settings,
     bonding_curve: str = "",
-) -> tuple[bool, list[tuple[str, float]], float]:
+) -> tuple[str, list[tuple[str, float]], float]:
     """Проверка распределения supply по топ-100 держателей.
 
-    Возвращает (прошёл ли фильтр, список холдеров без bonding curve,
-    суммарная доля топ-10 в % — используется в скоринге).
+    Возвращает (статус, список холдеров без bonding curve, доля топ-10 в %).
+    Статус: "ok" — прошёл, "fail" — отсеян, "incomplete" — Helius ещё не
+    проиндексировал свежий токен, данные неполные и анализ надо повторить позже.
     Холдеры — пары (адрес, доля в %) по убыванию доли; отдаются наружу,
     чтобы фильтр HUMAN не запрашивал их повторно.
 
@@ -39,8 +40,10 @@ async def check_concentration(
     """
     supply_info = await helius.get_token_supply(mint)
     if not supply_info or supply_info[0] <= 0:
-        log.info("[%s] concentration: не удалось получить supply", mint)
-        return False, [], 0.0
+        # Свежий минт ещё не виден ноде ("could not find account") — это
+        # задержка индексации, а не вердикт фильтра
+        log.info("[%s] concentration: supply ещё не доступен", mint)
+        return "incomplete", [], 0.0
     raw_supply, _decimals = supply_info
 
     # DAS индексирует свежесозданные токены с задержкой: если аккаунтов
@@ -60,7 +63,7 @@ async def check_concentration(
             "[%s] concentration: DAS так и вернул %d аккаунтов — данные неполные",
             mint, len(accounts),
         )
-        return False, [], 0.0
+        return "incomplete", [], 0.0
 
     # DAS getTokenAccounts и getTokenSupply оба отдают amount в сырых единицах,
     # поэтому доля считается напрямую от полного supply.
@@ -73,7 +76,7 @@ async def check_concentration(
         holders.append((owner, float(raw_amount)))
 
     if not holders:
-        return False, [], 0.0
+        return "incomplete", [], 0.0
 
     shares = [(owner, amount / raw_supply * 100.0) for owner, amount in holders]
     shares.sort(key=lambda item: item[1], reverse=True)
@@ -86,7 +89,7 @@ async def check_concentration(
     ]
 
     if not filtered:
-        return False, [], 0.0
+        return "incomplete", [], 0.0
 
     max_share = max(share for _, share in filtered)
     top10_sum = sum(share for _, share in filtered[:10])
@@ -94,18 +97,18 @@ async def check_concentration(
     # Ни у одного холдера нет больше HOLDER_MAX_PERCENT
     if max_share > settings.holder_max_percent:
         log.info("[%s] concentration: холдер держит %.2f%%", mint, max_share)
-        return False, filtered, top10_sum
+        return "fail", filtered, top10_sum
 
     # Сумма топ-10 меньше TOP10_MAX_PERCENT
     if top10_sum >= settings.top10_max_percent:
         log.info("[%s] concentration: топ-10 держат %.2f%%", mint, top10_sum)
-        return False, filtered, top10_sum
+        return "fail", filtered, top10_sum
 
     log.info(
         "[%s] concentration OK: max %.2f%%, топ-10 %.2f%%",
         mint, max_share, top10_sum,
     )
-    return True, filtered, top10_sum
+    return "ok", filtered, top10_sum
 
 
 # ---------------------------------------------------------------------------

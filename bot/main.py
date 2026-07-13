@@ -109,10 +109,19 @@ async def analyze_token(ctx: Context, mint: str, bonding_curve: str) -> None:
     log.info("[%s] 🔎 запускаю анализ (bonding curve %s)", mint, bonding_curve)
 
     # Фильтр 1: концентрация
-    conc_ok, holders, top10_percent = await check_concentration(
+    conc_status, holders, top10_percent = await check_concentration(
         mint, ctx.helius, s, bonding_curve
     )
-    if not conc_ok:
+    if conc_status == "incomplete":
+        # Helius ещё не проиндексировал токен — это не вердикт фильтра.
+        # Укорачиваем метку seen: следующая покупка вернёт токен на анализ
+        log.info(
+            "[%s] 🔁 данные ещё не проиндексированы — повтор через ~%d сек",
+            mint, s.analysis_retry_ttl,
+        )
+        await ctx.redis.set(f"seen:{mint}", "1", ex=s.analysis_retry_ttl)
+        return
+    if conc_status != "ok":
         log.info("[%s] ❌ ОТСЕЯН фильтром concentration", mint)
         await ctx.stats.record_filter_result(mint, "concentration")
         return
@@ -302,8 +311,14 @@ async def candidate_worker(ctx: Context) -> None:
                 mint, event_mc,
             )
             tx = await ctx.helius.get_transaction(signature)
+            if not tx:
+                # Транзакция могла ещё не доехать до ноды — одна повторная попытка
+                await asyncio.sleep(3)
+                tx = await ctx.helius.get_transaction(signature)
             if not tx or (tx.get("meta") or {}).get("err"):
-                await ctx.redis.delete(f"seen:{mint}")
+                # Короткий бан вместо мгновенного повтора, иначе токен
+                # зацикливается: каждая новая покупка возвращает его в очередь
+                await ctx.redis.set(f"seen:{mint}", "1", ex=s.analysis_retry_ttl)
                 continue
             ctx.stats.bump("tx_checked")
             parsed = find_buy_accounts(
@@ -311,7 +326,7 @@ async def candidate_worker(ctx: Context) -> None:
                 target_mint=mint,
             )
             if not parsed:
-                await ctx.redis.delete(f"seen:{mint}")
+                await ctx.redis.set(f"seen:{mint}", "1", ex=s.analysis_retry_ttl)
                 continue
             _, bonding_curve = parsed
             await analyze_token(ctx, mint, bonding_curve)

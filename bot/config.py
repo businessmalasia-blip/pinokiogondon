@@ -84,6 +84,7 @@ class Settings:
     das_min_accounts: int
     das_retry_delay: float
     das_retries: int
+    analysis_retry_ttl: int
     log_level: str
 
     @property
@@ -147,5 +148,6 @@ def load_settings() -> Settings:
         das_min_accounts=int(os.getenv("DAS_MIN_ACCOUNTS", "15")),
         das_retry_delay=float(os.getenv("DAS_RETRY_DELAY", "12")),
         das_retries=int(os.getenv("DAS_RETRIES", "2")),
+        analysis_retry_ttl=int(os.getenv("ANALYSIS_RETRY_TTL", "180")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
     )
