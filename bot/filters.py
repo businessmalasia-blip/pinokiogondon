@@ -165,10 +165,8 @@ async def calculate_human_percent(
         and unknown_percent <= settings.unknown_max_percent
     )
     log.info(
-        "[%s] human: HUMAN %.1f%% / UNKNOWN %.1f%% (%d холдеров, пороги ≥%.0f/≤%.0f) -> %s",
+        "[%s] human: HUMAN %.1f%% / UNKNOWN %.1f%% (%d холдеров)",
         mint, human_percent, unknown_percent, total,
-        settings.human_min_percent, settings.unknown_max_percent,
-        "OK" if passed else "FAIL",
     )
     return passed, human_percent
 
@@ -177,21 +175,31 @@ async def calculate_human_percent(
 # Доля bundle-покупок (считается по уже загруженным сигнатурам минта)
 # ---------------------------------------------------------------------------
 
-def calculate_bundle_percent(signatures: list[dict], min_txs_per_slot: int) -> float:
-    """Доля bundle-транзакций среди всех транзакций токена.
+def calculate_bundle_percent(signatures: list[dict], window_slots: int) -> float:
+    """Доля покупок, забандленных на запуске токена.
 
-    Бандлы (Jito, снайпер-боты, мульти-покупки) садятся пачками в один слот.
-    Транзакции из слотов, где их >= min_txs_per_slot, считаются бандловыми.
-    Работает по ответу getSignaturesForAddress(mint) — новых запросов нет.
+    Бандл — транзакции, севшие в слот создания токена (+window_slots
+    следующих слотов): органическая покупка не может попасть в слот
+    создания, туда попадают только скоординированные снайперы (Jito-бандлы).
+    Считается по ответу getSignaturesForAddress(mint) — новых запросов нет.
+    У активных токенов несколько органических покупок в одном слоте — норма
+    (слот 400 мс), поэтому совпадение слотов вне запуска бандлом НЕ считается.
     """
     valid = [sig for sig in signatures if not sig.get("err") and sig.get("slot")]
-    if not valid:
+    if len(valid) < 2:
         return 0.0
-    per_slot: dict[int, int] = {}
-    for sig in valid:
-        per_slot[sig["slot"]] = per_slot.get(sig["slot"], 0) + 1
-    bundled = sum(count for count in per_slot.values() if count >= min_txs_per_slot)
-    return bundled / len(valid) * 100.0
+    if len(valid) >= 1000:
+        # История обрезана лимитом запроса — слот создания не виден,
+        # метрика недостоверна; токен не наказываем
+        return 0.0
+    slots = [sig["slot"] for sig in valid]
+    creation_slot = min(slots)
+    # Минус 1 — сама транзакция создания
+    bundled = sum(1 for slot in slots if slot <= creation_slot + window_slots) - 1
+    total = len(slots) - 1
+    if total <= 0:
+        return 0.0
+    return max(bundled, 0) / total * 100.0
 
 
 # ---------------------------------------------------------------------------

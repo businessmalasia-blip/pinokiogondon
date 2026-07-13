@@ -120,41 +120,27 @@ async def analyze_token(ctx: Context, mint: str, bonding_curve: str) -> None:
         mint, len(holders), top10_percent,
     )
 
-    # Фильтр 2: HUMAN-процент
-    human_ok, human_percent = await calculate_human_percent(
+    # Дальше жёстких отсечек нет: метрики только считаются,
+    # решение принимает общий скоринг
+    _, human_percent = await calculate_human_percent(
         holders, ctx.redis, ctx.helius, s, mint
     )
-    if not human_ok:
-        log.info("[%s] ❌ ОТСЕЯН фильтром human", mint)
-        await ctx.stats.record_filter_result(mint, "human")
-        return
-    log.info("[%s] ✔ human пройден (HUMAN %.0f%%)", mint, human_percent)
+    log.info("[%s] 👥 HUMAN %.0f%%", mint, human_percent)
 
     # Сигнатуры минта: один запрос, используется бандл-метрикой и check_dev
     mint_signatures = await ctx.helius.get_signatures(mint, limit=1000)
 
-    # Бандлы: доля транзакций, севших пачками в один слот
-    bundle_percent = calculate_bundle_percent(mint_signatures, s.bundle_slot_min_txs)
-    if bundle_percent > s.max_bundle_percent:
-        log.info(
-            "[%s] ❌ ОТСЕЯН фильтром bundle (%.1f%% > %.0f%%)",
-            mint, bundle_percent, s.max_bundle_percent,
-        )
-        await ctx.stats.record_filter_result(mint, "bundle")
-        return
-    log.info("[%s] ✔ bundle пройден (%.1f%%)", mint, bundle_percent)
+    # Бандлы: доля покупок в слоте создания токена (снайперы на запуске)
+    bundle_percent = calculate_bundle_percent(mint_signatures, s.bundle_slot_window)
+    log.info("[%s] 📦 бандлы на запуске: %.1f%%", mint, bundle_percent)
 
-    # Фильтр 3: дев
+    # История дева (Bad не отсеивает — даёт 0 баллов за MSR в скоринге)
     dev = await check_dev(
         mint, ctx.redis, ctx.helius, ctx.http, s, mint_signatures=mint_signatures
     )
-    if dev["status"] == "Bad":
-        log.info("[%s] ❌ ОТСЕЯН фильтром dev (Bad, MSR %s)", mint, dev["msr"])
-        await ctx.stats.record_filter_result(mint, "dev")
-        return
-    log.info("[%s] ✔ dev пройден (%s, MSR %s)", mint, dev["status"], dev["msr"])
+    log.info("[%s] 👨‍💻 dev: %s, MSR %s", mint, dev["status"], dev["msr"])
 
-    # Скоринг по уже посчитанным метрикам
+    # Скоринг по посчитанным метрикам — единственный решающий порог
     score = calculate_score(
         {
             "human_percent": human_percent,

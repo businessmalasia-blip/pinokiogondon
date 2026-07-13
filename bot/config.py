@@ -60,8 +60,7 @@ class Settings:
     human_min_candidates: int
 
     # Бандлы
-    max_bundle_percent: float
-    bundle_slot_min_txs: int
+    bundle_slot_window: int
 
     # Скоринг
     min_score: float
@@ -126,8 +125,7 @@ def load_settings() -> Settings:
         human_check_top=int(os.getenv("HUMAN_CHECK_TOP", "30")),
         human_min_holder_share=float(os.getenv("HUMAN_MIN_HOLDER_SHARE", "0.5")),
         human_min_candidates=int(os.getenv("HUMAN_MIN_CANDIDATES", "10")),
-        max_bundle_percent=float(os.getenv("MAX_BUNDLE_PERCENT", "25")),
-        bundle_slot_min_txs=int(os.getenv("BUNDLE_SLOT_MIN_TXS", "3")),
+        bundle_slot_window=int(os.getenv("BUNDLE_SLOT_WINDOW", "2")),
         min_score=float(os.getenv("MIN_SCORE", "7.5")),
         score_weight_human=float(os.getenv("SCORE_WEIGHT_HUMAN", "0.30")),
         score_weight_msr=float(os.getenv("SCORE_WEIGHT_MSR", "0.25")),

@@ -14,9 +14,6 @@ STREAM_ALIVE_THRESHOLD = 30
 
 FILTER_ROWS = (
     ("concentration", "отсеяно"),
-    ("human", "отсеяно"),
-    ("bundle", "отсеяно"),
-    ("dev", "отсеяно"),
     ("score", "отсеяно"),
     ("passed", "прошло"),
 )
@@ -142,7 +139,6 @@ async def cmd_settings(message: Message, ctx) -> None:
         f"HUMAN: ≥ {s.human_min_percent:.0f}% | UNKNOWN: ≤ {s.unknown_max_percent:.0f}%\n"
         f"MSR: ≥ {s.msr_min_percent:.0f}% (мин. {s.dev_min_tokens} токенов, "
         f"{s.dev_history_days} дн.)\n"
-        f"Бандлы: ≤ {s.max_bundle_percent:.0f}%\n"
         f"Мин. скор: {s.min_score} (веса H {s.score_weight_human:.2f} / "
         f"MSR {s.score_weight_msr:.2f} / C {s.score_weight_concentration:.2f} / "
         f"B {s.score_weight_bundle:.2f})\n"
