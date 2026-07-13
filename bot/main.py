@@ -5,6 +5,7 @@ Telegram-команды и фоновая проверка исходов.
 """
 
 import asyncio
+import base64
 import json
 import logging
 import time
@@ -33,7 +34,13 @@ from .helius import HeliusClient
 from .jupiter import get_token_info, token_price
 from .outcomes import outcomes_loop
 from .prices import get_market_cap, get_sol_price, sol_price_loop
-from .pump import find_buy_accounts, iter_trade_events, market_cap_from_reserves
+from .pump import (
+    derive_bonding_curve,
+    find_buy_accounts,
+    iter_trade_events,
+    market_cap_from_reserves,
+    parse_bonding_curve_state,
+)
 from .stats import Stats
 
 log = logging.getLogger("bot")
@@ -209,6 +216,9 @@ async def wait_and_alert(
         mc = await wait_for_mc_range(ctx, mint, bonding_curve, timeout=remaining)
         if mc is None:
             ctx.stats.bump("no_window")
+            # Токен мог слиться и вернуться (камбек) — даём шанс на повторный
+            # цикл анализа вместо часового бана
+            await ctx.redis.set(f"seen:{mint}", "1", ex=s.analysis_retry_ttl)
             return
 
         # Контрольная проверка капы прямо перед отправкой
@@ -218,6 +228,7 @@ async def wait_and_alert(
         ):
             log.info("[%s] алерт отменён: капа %s вне guard-диапазона", mint, final_mc)
             ctx.stats.bump("guard_out")
+            await ctx.redis.set(f"seen:{mint}", "1", ex=s.analysis_retry_ttl)
             return
 
         asset = await ctx.helius.get_asset(mint)
@@ -296,12 +307,48 @@ def screen_buy_events(ctx: Context, logs: list[str]) -> list[tuple[str, float]]:
     return candidates
 
 
-async def candidate_worker(ctx: Context) -> None:
-    """Воркер полного анализа: берёт кандидатов из ограниченной очереди.
+async def resolve_bonding_curve(ctx: Context, mint: str, signature: str) -> Optional[str]:
+    """Определяет адрес bonding curve токена.
 
-    Только здесь тратятся RPC-запросы: одна getTransaction на кандидата
-    (ради адреса bonding curve), дальше обычный пайплайн фильтров.
+    Основной путь — PDA-деривация из минта (без гаданий по транзакции)
+    с проверкой аккаунта по дискриминатору. Запасной — разбор инструкции
+    buy из транзакции (на случай нестандартных вариантов программы).
     """
+    s = ctx.settings
+    derived = derive_bonding_curve(mint, s.pump_program)
+    if derived:
+        value = await ctx.helius.get_account_info(derived)
+        data_field = (value or {}).get("data")
+        if isinstance(data_field, list) and data_field and data_field[0]:
+            try:
+                state = parse_bonding_curve_state(base64.b64decode(data_field[0]))
+            except (ValueError, TypeError):
+                state = None
+            if state:
+                return derived
+        log.info("[%s] PDA кривой не подтвердился — пробую через транзакцию", mint)
+
+    tx = await ctx.helius.get_transaction(signature)
+    if not tx:
+        # Транзакция могла ещё не доехать до ноды — одна повторная попытка
+        await asyncio.sleep(3)
+        tx = await ctx.helius.get_transaction(signature)
+    if not tx or (tx.get("meta") or {}).get("err"):
+        log.warning("[%s] ⚠️ не удалось получить транзакцию %s…", mint, signature[:16])
+        return None
+    ctx.stats.bump("tx_checked")
+    parsed = find_buy_accounts(
+        tx, s.pump_program, s.buy_mint_index, s.buy_bonding_curve_index,
+        target_mint=mint,
+    )
+    if not parsed:
+        log.warning("[%s] ⚠️ buy-инструкция не найдена в транзакции", mint)
+        return None
+    return parsed[1]
+
+
+async def candidate_worker(ctx: Context) -> None:
+    """Воркер полного анализа: берёт кандидатов из ограниченной очереди."""
     s = ctx.settings
     while True:
         signature, mint, event_mc = await ctx.candidate_queue.get()
@@ -310,25 +357,16 @@ async def candidate_worker(ctx: Context) -> None:
                 "[%s] 💵 MC $%.0f (из события) в диапазоне — токен идёт на анализ",
                 mint, event_mc,
             )
-            tx = await ctx.helius.get_transaction(signature)
-            if not tx:
-                # Транзакция могла ещё не доехать до ноды — одна повторная попытка
-                await asyncio.sleep(3)
-                tx = await ctx.helius.get_transaction(signature)
-            if not tx or (tx.get("meta") or {}).get("err"):
+            bonding_curve = await resolve_bonding_curve(ctx, mint, signature)
+            if not bonding_curve:
                 # Короткий бан вместо мгновенного повтора, иначе токен
                 # зацикливается: каждая новая покупка возвращает его в очередь
+                log.info(
+                    "[%s] 🔁 bonding curve не определена — повтор через ~%d сек",
+                    mint, s.analysis_retry_ttl,
+                )
                 await ctx.redis.set(f"seen:{mint}", "1", ex=s.analysis_retry_ttl)
                 continue
-            ctx.stats.bump("tx_checked")
-            parsed = find_buy_accounts(
-                tx, s.pump_program, s.buy_mint_index, s.buy_bonding_curve_index,
-                target_mint=mint,
-            )
-            if not parsed:
-                await ctx.redis.set(f"seen:{mint}", "1", ex=s.analysis_retry_ttl)
-                continue
-            _, bonding_curve = parsed
             await analyze_token(ctx, mint, bonding_curve)
         except asyncio.CancelledError:
             raise

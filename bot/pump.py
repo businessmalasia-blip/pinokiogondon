@@ -8,6 +8,7 @@ import struct
 from typing import Iterator, Optional
 
 import base58
+from solders.pubkey import Pubkey
 
 # Anchor-дискриминаторы инструкций программы Pump.fun
 BUY_DISCRIMINATOR = bytes.fromhex("66063d1201daebea")
@@ -80,6 +81,20 @@ def find_created_mint(tx: dict, program_id: str) -> Optional[str]:
         if accounts:
             return accounts[0]
     return None
+
+
+def derive_bonding_curve(mint: str, program_id: str) -> Optional[str]:
+    """Адрес bonding curve выводится математически: PDA с сидами
+    ["bonding-curve", mint] программы Pump.fun. Сверено с боевыми парами
+    mint -> curve, включая минты без суффикса "pump"."""
+    try:
+        derived, _bump = Pubkey.find_program_address(
+            [b"bonding-curve", bytes(Pubkey.from_string(mint))],
+            Pubkey.from_string(program_id),
+        )
+        return str(derived)
+    except (ValueError, TypeError):
+        return None
 
 
 def parse_bonding_curve_state(data: bytes) -> Optional[dict]:
