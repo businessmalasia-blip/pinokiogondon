@@ -109,7 +109,7 @@ def load_settings() -> Settings:
         send_guard_mc_min=float(os.getenv("SEND_GUARD_MC_MIN", "9000")),
         send_guard_mc_max=float(os.getenv("SEND_GUARD_MC_MAX", "13000")),
         mc_poll_interval=float(os.getenv("MC_POLL_INTERVAL", "2")),
-        mc_wait_timeout=float(os.getenv("MC_WAIT_TIMEOUT", "900")),
+        mc_wait_timeout=float(os.getenv("MC_WAIT_TIMEOUT", "1200")),
         mc_wait_abort_below=float(os.getenv("MC_WAIT_ABORT_BELOW", "6000")),
         sol_price_interval=float(os.getenv("SOL_PRICE_INTERVAL", "2")),
         helius_rate_limit=float(os.getenv("HELIUS_RATE_LIMIT", "0.25")),
