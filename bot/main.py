@@ -59,11 +59,17 @@ async def market_cap(ctx: Context, bonding_curve: str) -> Optional[float]:
 # Ожидание входа капы в целевой диапазон
 # ---------------------------------------------------------------------------
 
-async def wait_for_mc_range(ctx: Context, mint: str, bonding_curve: str) -> Optional[float]:
+async def wait_for_mc_range(
+    ctx: Context, mint: str, bonding_curve: str, timeout: Optional[float] = None
+) -> Optional[float]:
     """Каждые MC_POLL_INTERVAL секунд опрашивает bonding curve, пока капа
     не войдёт в диапазон [ALERT_MC_MIN, ALERT_MC_MAX] или не истечёт таймаут."""
     s = ctx.settings
-    deadline = time.monotonic() + s.mc_wait_timeout
+    if timeout is None:
+        timeout = s.mc_wait_timeout
+    if timeout <= 0:
+        return None
+    deadline = time.monotonic() + timeout
     poll_count = 0
     progress_every = max(1, int(30 / s.mc_poll_interval))
     while time.monotonic() < deadline:
@@ -177,39 +183,88 @@ async def analyze_token(ctx: Context, mint: str, bonding_curve: str) -> None:
     )
     await ctx.stats.record_filter_result(mint, "passed")
 
-    # Ждём входа капы в диапазон
-    mc = await wait_for_mc_range(ctx, mint, bonding_curve)
-    if mc is None:
-        return
-
-    # Контрольная проверка капы прямо перед отправкой
-    final_mc = await market_cap(ctx, bonding_curve)
-    if final_mc is None or not (s.send_guard_mc_min <= final_mc <= s.send_guard_mc_max):
-        log.info("[%s] алерт отменён: капа %s вне guard-диапазона", mint, final_mc)
-        return
-
-    asset = await ctx.helius.get_asset(mint)
-    name, symbol, image_url = extract_token_meta(asset)
-    text = build_alert_text(
-        name=name,
-        symbol=symbol,
-        mint=mint,
-        human_percent=human_percent,
-        dev_status=dev["status"],
-        msr=dev["msr"],
-        top10_percent=top10_percent,
-        bundle_percent=bundle_percent,
-        score=score,
-        market_cap=final_mc,
+    alert_data = {
+        "bonding_curve": bonding_curve,
+        "human_percent": human_percent,
+        "dev_status": dev["status"],
+        "msr": dev["msr"],
+        "top10_percent": top10_percent,
+        "bundle_percent": bundle_percent,
+        "score": score,
+        "passed_at": time.time(),
+    }
+    # Сохраняем состояние ожидания: переживает рестарт бота
+    await ctx.redis.set(
+        f"pending_alert:{mint}",
+        json.dumps(alert_data),
+        ex=int(s.mc_wait_timeout) + 60,
     )
-    await send_alert(ctx.tg_bot, s.telegram_chat_id, text, image_url)
-    log.info("[%s] алерт отправлен, MC $%.0f", mint, final_mc)
+    await wait_and_alert(ctx, mint, bonding_curve, alert_data)
 
-    # Фиксируем алерт для /stats и /last; цену берём из Jupiter,
-    # при её отсутствии — оценку из капы (supply Pump.fun = 1 млрд)
-    info = await get_token_info(ctx.http, mint)
-    price = token_price(info) or final_mc / 1e9
-    await ctx.stats.record_alert(mint, name, symbol, final_mc, price)
+
+async def wait_and_alert(
+    ctx: Context, mint: str, bonding_curve: str, alert_data: dict
+) -> None:
+    """Ожидание окна капы и отправка алерта. Состояние хранится в Redis,
+    поэтому после рестарта ожидание возобновляется, а не пропадает."""
+    s = ctx.settings
+    remaining = s.mc_wait_timeout - (time.time() - alert_data["passed_at"])
+    try:
+        mc = await wait_for_mc_range(ctx, mint, bonding_curve, timeout=remaining)
+        if mc is None:
+            ctx.stats.bump("no_window")
+            return
+
+        # Контрольная проверка капы прямо перед отправкой
+        final_mc = await market_cap(ctx, bonding_curve)
+        if final_mc is None or not (
+            s.send_guard_mc_min <= final_mc <= s.send_guard_mc_max
+        ):
+            log.info("[%s] алерт отменён: капа %s вне guard-диапазона", mint, final_mc)
+            ctx.stats.bump("guard_out")
+            return
+
+        asset = await ctx.helius.get_asset(mint)
+        name, symbol, image_url = extract_token_meta(asset)
+        text = build_alert_text(
+            name=name,
+            symbol=symbol,
+            mint=mint,
+            human_percent=alert_data["human_percent"],
+            dev_status=alert_data["dev_status"],
+            msr=alert_data["msr"],
+            top10_percent=alert_data["top10_percent"],
+            bundle_percent=alert_data["bundle_percent"],
+            score=alert_data["score"],
+            market_cap=final_mc,
+        )
+        await send_alert(ctx.tg_bot, s.telegram_chat_id, text, image_url)
+        log.info("[%s] 🔔 алерт отправлен, MC $%.0f", mint, final_mc)
+
+        # Фиксируем алерт для /stats и /last; цену берём из Jupiter,
+        # при её отсутствии — оценку из капы (supply Pump.fun = 1 млрд)
+        info = await get_token_info(ctx.http, mint)
+        price = token_price(info) or final_mc / 1e9
+        await ctx.stats.record_alert(mint, name, symbol, final_mc, price)
+    finally:
+        await ctx.redis.delete(f"pending_alert:{mint}")
+
+
+async def resume_pending_alerts(ctx: Context) -> None:
+    """После рестарта возобновляет ожидания окна капы, прерванные остановкой."""
+    async for key in ctx.redis.scan_iter("pending_alert:*"):
+        raw = await ctx.redis.get(key)
+        if not raw:
+            continue
+        try:
+            alert_data = json.loads(raw)
+            mint = key.split(":", 1)[1]
+            bonding_curve = alert_data["bonding_curve"]
+        except (json.JSONDecodeError, KeyError):
+            await ctx.redis.delete(key)
+            continue
+        log.info("[%s] ♻️ возобновляю ожидание окна капы после рестарта", mint)
+        asyncio.create_task(wait_and_alert(ctx, mint, bonding_curve, alert_data))
 
 
 async def handle_buy_signature(ctx: Context, signature: str) -> None:
@@ -419,6 +474,7 @@ async def run() -> None:
 
         await tg_bot.set_my_commands(BOT_COMMANDS)
         await send_startup_message(tg_bot, settings.telegram_chat_id)
+        await resume_pending_alerts(ctx)
 
         dispatcher = Dispatcher()
         dispatcher.include_router(commands_router)

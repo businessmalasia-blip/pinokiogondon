@@ -77,6 +77,8 @@ async def cmd_stats(message: Message, ctx) -> None:
     lines = [
         "📊 <b>Статистика скринера</b>",
         f"Всего алертов: {counters.get('alerts_sent', 0):,}",
+        f"Прошли фильтры, но капа не вошла в окно: {counters.get('no_window', 0):,}",
+        f"Отменено guard-проверкой при отправке: {counters.get('guard_out', 0):,}",
     ]
 
     for window in ("1h", "6h"):
