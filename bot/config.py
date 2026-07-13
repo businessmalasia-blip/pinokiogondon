@@ -57,6 +57,17 @@ class Settings:
     human_check_top: int
     human_min_holder_share: float
 
+    # Бандлы
+    max_bundle_percent: float
+    bundle_slot_min_txs: int
+
+    # Скоринг
+    min_score: float
+    score_weight_human: float
+    score_weight_msr: float
+    score_weight_concentration: float
+    score_weight_bundle: float
+
     # Фильтр 3: дев
     msr_min_percent: float
     dev_min_tokens: int
@@ -111,6 +122,13 @@ def load_settings() -> Settings:
         unknown_cache_ttl=int(os.getenv("UNKNOWN_CACHE_TTL", "3600")),
         human_check_top=int(os.getenv("HUMAN_CHECK_TOP", "30")),
         human_min_holder_share=float(os.getenv("HUMAN_MIN_HOLDER_SHARE", "0.5")),
+        max_bundle_percent=float(os.getenv("MAX_BUNDLE_PERCENT", "25")),
+        bundle_slot_min_txs=int(os.getenv("BUNDLE_SLOT_MIN_TXS", "3")),
+        min_score=float(os.getenv("MIN_SCORE", "7.5")),
+        score_weight_human=float(os.getenv("SCORE_WEIGHT_HUMAN", "0.30")),
+        score_weight_msr=float(os.getenv("SCORE_WEIGHT_MSR", "0.25")),
+        score_weight_concentration=float(os.getenv("SCORE_WEIGHT_CONCENTRATION", "0.25")),
+        score_weight_bundle=float(os.getenv("SCORE_WEIGHT_BUNDLE", "0.20")),
         msr_min_percent=float(os.getenv("MSR_MIN_PERCENT", "70")),
         dev_min_tokens=int(os.getenv("DEV_MIN_TOKENS", "3")),
         dev_history_days=int(os.getenv("DEV_HISTORY_DAYS", "30")),

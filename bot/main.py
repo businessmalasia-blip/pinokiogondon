@@ -22,7 +22,13 @@ from redis.asyncio import Redis
 from .alerts import build_alert_text, extract_token_meta, send_alert, send_startup_message
 from .commands import router as commands_router
 from .config import Settings, load_settings
-from .filters import calculate_human_percent, check_concentration, check_dev
+from .filters import (
+    calculate_bundle_percent,
+    calculate_human_percent,
+    check_concentration,
+    check_dev,
+)
+from .scoring import calculate_score
 from .helius import HeliusClient
 from .jupiter import get_token_info, token_price
 from .outcomes import outcomes_loop
@@ -86,12 +92,17 @@ async def analyze_token(ctx: Context, mint: str, bonding_curve: str) -> None:
     log.info("[%s] 🔎 запускаю анализ (bonding curve %s)", mint, bonding_curve)
 
     # Фильтр 1: концентрация
-    conc_ok, holders = await check_concentration(mint, ctx.helius, s, bonding_curve)
+    conc_ok, holders, top10_percent = await check_concentration(
+        mint, ctx.helius, s, bonding_curve
+    )
     if not conc_ok:
         log.info("[%s] ❌ ОТСЕЯН фильтром concentration", mint)
         await ctx.stats.record_filter_result(mint, "concentration")
         return
-    log.info("[%s] ✔ concentration пройден (%d холдеров)", mint, len(holders))
+    log.info(
+        "[%s] ✔ concentration пройден (%d холдеров, топ-10 %.1f%%)",
+        mint, len(holders), top10_percent,
+    )
 
     # Фильтр 2: HUMAN-процент
     human_ok, human_percent = await calculate_human_percent(
@@ -103,18 +114,56 @@ async def analyze_token(ctx: Context, mint: str, bonding_curve: str) -> None:
         return
     log.info("[%s] ✔ human пройден (HUMAN %.0f%%)", mint, human_percent)
 
+    # Сигнатуры минта: один запрос, используется бандл-метрикой и check_dev
+    mint_signatures = await ctx.helius.get_signatures(mint, limit=1000)
+
+    # Бандлы: доля транзакций, севших пачками в один слот
+    bundle_percent = calculate_bundle_percent(mint_signatures, s.bundle_slot_min_txs)
+    if bundle_percent > s.max_bundle_percent:
+        log.info(
+            "[%s] ❌ ОТСЕЯН фильтром bundle (%.1f%% > %.0f%%)",
+            mint, bundle_percent, s.max_bundle_percent,
+        )
+        await ctx.stats.record_filter_result(mint, "bundle")
+        return
+    log.info("[%s] ✔ bundle пройден (%.1f%%)", mint, bundle_percent)
+
     # Фильтр 3: дев
-    dev = await check_dev(mint, ctx.redis, ctx.helius, ctx.http, s)
+    dev = await check_dev(
+        mint, ctx.redis, ctx.helius, ctx.http, s, mint_signatures=mint_signatures
+    )
     if dev["status"] == "Bad":
         log.info("[%s] ❌ ОТСЕЯН фильтром dev (Bad, MSR %s)", mint, dev["msr"])
         await ctx.stats.record_filter_result(mint, "dev")
         return
     log.info("[%s] ✔ dev пройден (%s, MSR %s)", mint, dev["status"], dev["msr"])
 
-    # Все три фильтра пройдены
+    # Скоринг по уже посчитанным метрикам
+    score = calculate_score(
+        {
+            "human_percent": human_percent,
+            "msr": dev["msr"],
+            "top10_percent": top10_percent,
+            "bundle_percent": bundle_percent,
+        },
+        s,
+    )
     log.info(
-        "[%s] 🎯 ВСЕ ФИЛЬТРЫ ПРОЙДЕНЫ — жду капу $%.0f–$%.0f",
-        mint, s.alert_mc_min, s.alert_mc_max,
+        "[%s] ⭐ Score %.1f/10 (human %d, msr %d, conc %d, bundle %d)",
+        mint, score["total"], score["human"], score["msr"],
+        score["concentration"], score["bundle"],
+    )
+    if score["total"] < s.min_score:
+        log.info(
+            "[%s] ❌ ОТСЕЯН по скору (%.1f < %.1f)", mint, score["total"], s.min_score
+        )
+        await ctx.stats.record_filter_result(mint, "score")
+        return
+
+    # Все фильтры и скоринг пройдены
+    log.info(
+        "[%s] 🎯 ВСЕ ФИЛЬТРЫ ПРОЙДЕНЫ (score %.1f) — жду капу $%.0f–$%.0f",
+        mint, score["total"], s.alert_mc_min, s.alert_mc_max,
     )
     await ctx.stats.record_filter_result(mint, "passed")
 
@@ -138,6 +187,9 @@ async def analyze_token(ctx: Context, mint: str, bonding_curve: str) -> None:
         human_percent=human_percent,
         dev_status=dev["status"],
         msr=dev["msr"],
+        top10_percent=top10_percent,
+        bundle_percent=bundle_percent,
+        score=score,
         market_cap=final_mc,
     )
     await send_alert(ctx.tg_bot, s.telegram_chat_id, text, image_url)

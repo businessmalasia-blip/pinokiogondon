@@ -24,10 +24,11 @@ async def check_concentration(
     helius: HeliusClient,
     settings: Settings,
     bonding_curve: str = "",
-) -> tuple[bool, list[tuple[str, float]]]:
+) -> tuple[bool, list[tuple[str, float]], float]:
     """Проверка распределения supply по топ-100 держателей.
 
-    Возвращает (прошёл ли фильтр, список холдеров без bonding curve).
+    Возвращает (прошёл ли фильтр, список холдеров без bonding curve,
+    суммарная доля топ-10 в % — используется в скоринге).
     Холдеры — пары (адрес, доля в %) по убыванию доли; отдаются наружу,
     чтобы фильтр HUMAN не запрашивал их повторно.
 
@@ -38,13 +39,13 @@ async def check_concentration(
     supply_info = await helius.get_token_supply(mint)
     if not supply_info or supply_info[0] <= 0:
         log.info("[%s] concentration: не удалось получить supply", mint)
-        return False, []
+        return False, [], 0.0
     raw_supply, _decimals = supply_info
 
     accounts = await helius.get_token_accounts(mint, limit=100)
     if not accounts:
         log.info("[%s] concentration: нет токен-аккаунтов", mint)
-        return False, []
+        return False, [], 0.0
 
     # DAS getTokenAccounts и getTokenSupply оба отдают amount в сырых единицах,
     # поэтому доля считается напрямую от полного supply.
@@ -57,7 +58,7 @@ async def check_concentration(
         holders.append((owner, float(raw_amount)))
 
     if not holders:
-        return False, []
+        return False, [], 0.0
 
     shares = [(owner, amount / raw_supply * 100.0) for owner, amount in holders]
     shares.sort(key=lambda item: item[1], reverse=True)
@@ -70,25 +71,26 @@ async def check_concentration(
     ]
 
     if not filtered:
-        return False, []
+        return False, [], 0.0
+
+    max_share = max(share for _, share in filtered)
+    top10_sum = sum(share for _, share in filtered[:10])
 
     # Ни у одного холдера нет больше HOLDER_MAX_PERCENT
-    max_share = max(share for _, share in filtered)
     if max_share > settings.holder_max_percent:
         log.info("[%s] concentration: холдер держит %.2f%%", mint, max_share)
-        return False, filtered
+        return False, filtered, top10_sum
 
     # Сумма топ-10 меньше TOP10_MAX_PERCENT
-    top10_sum = sum(share for _, share in filtered[:10])
     if top10_sum >= settings.top10_max_percent:
         log.info("[%s] concentration: топ-10 держат %.2f%%", mint, top10_sum)
-        return False, filtered
+        return False, filtered, top10_sum
 
     log.info(
         "[%s] concentration OK: max %.2f%%, топ-10 %.2f%%",
         mint, max_share, top10_sum,
     )
-    return True, filtered
+    return True, filtered, top10_sum
 
 
 # ---------------------------------------------------------------------------
@@ -161,12 +163,34 @@ async def calculate_human_percent(
 
 
 # ---------------------------------------------------------------------------
+# Доля bundle-покупок (считается по уже загруженным сигнатурам минта)
+# ---------------------------------------------------------------------------
+
+def calculate_bundle_percent(signatures: list[dict], min_txs_per_slot: int) -> float:
+    """Доля bundle-транзакций среди всех транзакций токена.
+
+    Бандлы (Jito, снайпер-боты, мульти-покупки) садятся пачками в один слот.
+    Транзакции из слотов, где их >= min_txs_per_slot, считаются бандловыми.
+    Работает по ответу getSignaturesForAddress(mint) — новых запросов нет.
+    """
+    valid = [sig for sig in signatures if not sig.get("err") and sig.get("slot")]
+    if not valid:
+        return 0.0
+    per_slot: dict[int, int] = {}
+    for sig in valid:
+        per_slot[sig["slot"]] = per_slot.get(sig["slot"], 0) + 1
+    bundled = sum(count for count in per_slot.values() if count >= min_txs_per_slot)
+    return bundled / len(valid) * 100.0
+
+
+# ---------------------------------------------------------------------------
 # Фильтр 3: история дева (MSR)
 # ---------------------------------------------------------------------------
 
-async def _find_creator(mint: str, helius: HeliusClient) -> Optional[str]:
+async def _find_creator(
+    mint: str, helius: HeliusClient, signatures: list[dict]
+) -> Optional[str]:
     """Создатель токена: feePayer самой первой транзакции по mint."""
-    signatures = await helius.get_signatures(mint, limit=1000)
     if not signatures:
         return None
     oldest = signatures[-1]["signature"]
@@ -190,12 +214,17 @@ async def check_dev(
     helius: HeliusClient,
     session: aiohttp.ClientSession,
     settings: Settings,
+    mint_signatures: Optional[list[dict]] = None,
 ) -> dict:
     """Оценка дева по выживаемости его прошлых токенов (MSR).
 
+    mint_signatures — заранее загруженные сигнатуры минта (переиспользуются
+    из пайплайна, чтобы не делать повторный запрос).
     Возвращает {"status": "Clean" | "Bad" | "Unknown", "msr": float | None}.
     """
-    creator = await _find_creator(mint, helius)
+    if mint_signatures is None:
+        mint_signatures = await helius.get_signatures(mint, limit=1000)
+    creator = await _find_creator(mint, helius, mint_signatures)
     if not creator:
         log.info("[%s] dev: создатель не найден", mint)
         return {"status": "Unknown", "msr": None}

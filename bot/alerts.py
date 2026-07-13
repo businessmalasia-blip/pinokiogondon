@@ -30,16 +30,22 @@ def build_alert_text(
     human_percent: float,
     dev_status: str,
     msr: Optional[float],
+    top10_percent: float,
+    bundle_percent: float,
+    score: dict,
     market_cap: float,
 ) -> str:
-    msr_info = f" | MSR: {msr:.0f}%" if msr is not None else ""
+    msr_text = f"{msr:.0f}%" if msr is not None else "—"
     return (
         "🔥 <b>QUALITY TOKEN</b>\n"
         f"🪙 <b>{html.escape(name)}</b> ({html.escape(symbol)})\n"
         f"📋 CA: <code>{mint}</code>\n"
         f'🔗 <a href="https://photon-sol.tinyastro.io/token/{mint}">Photon</a>\n'
-        f"👥 Humans: {human_percent:.0f}%\n"
-        f"👨‍💻 Dev: {dev_status}{msr_info}\n"
+        f"⭐ Score: {score['total']}/10\n"
+        f"👥 Humans: {human_percent:.0f}% ({score['human']}/10)\n"
+        f"👨‍💻 Dev: {dev_status}, MSR {msr_text} ({score['msr']}/10)\n"
+        f"📊 Concentration: Top-10 {top10_percent:.1f}% ({score['concentration']}/10)\n"
+        f"📦 Bundle: {bundle_percent:.1f}% ({score['bundle']}/10)\n"
         f"💰 MC: ${market_cap:,.0f}"
     )
 
