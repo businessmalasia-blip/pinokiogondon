@@ -25,51 +25,51 @@ async def check_concentration(
     helius: HeliusClient,
     settings: Settings,
     bonding_curve: str = "",
+    raw_supply: int = 0,
 ) -> tuple[str, list[tuple[str, float]], float]:
-    """Проверка распределения supply по топ-100 держателей.
+    """Проверка распределения supply по крупнейшим держателям.
+
+    Холдеры берутся через getTokenLargestAccounts (топ-20 аккаунтов) —
+    это текущее состояние сети без задержки DAS-индексации, работает
+    для токенов возрастом в секунды. Supply передаётся снаружи (он уже
+    прочитан из аккаунта bonding curve).
 
     Возвращает (статус, список холдеров без bonding curve, доля топ-10 в %).
-    Статус: "ok" — прошёл, "fail" — отсеян, "incomplete" — Helius ещё не
-    проиндексировал свежий токен, данные неполные и анализ надо повторить позже.
-    Холдеры — пары (адрес, доля в %) по убыванию доли; отдаются наружу,
-    чтобы фильтр HUMAN не запрашивал их повторно.
+    Статус: "ok" — прошёл, "fail" — отсеян, "incomplete" — данных пока
+    мало и анализ надо повторить позже.
+    Холдеры — пары (адрес владельца, доля в %) по убыванию доли; отдаются
+    наружу, чтобы фильтр HUMAN не запрашивал их повторно.
 
     Bonding curve исключается в первую очередь по адресу владельца:
     при капе выше ~$7k кривая держит меньше 50% supply и порог по доле
     её уже не ловит. Порог >50% остаётся страховкой.
     """
-    supply_info = await helius.get_token_supply(mint)
-    if not supply_info or supply_info[0] <= 0:
-        # Свежий минт ещё не виден ноде ("could not find account") — это
-        # задержка индексации, а не вердикт фильтра
-        log.info("[%s] concentration: supply ещё не доступен", mint)
+    if raw_supply <= 0:
         return "incomplete", [], 0.0
-    raw_supply, _decimals = supply_info
 
-    # DAS индексирует свежесозданные токены с задержкой: если аккаунтов
-    # подозрительно мало, ждём и перечитываем, а не верим обрубку списка
-    accounts = await helius.get_token_accounts(mint, limit=100)
+    accounts = await helius.get_token_largest_accounts(mint)
     attempts = 0
     while len(accounts) < settings.das_min_accounts and attempts < settings.das_retries:
         attempts += 1
         log.info(
-            "[%s] concentration: DAS вернул %d аккаунтов — жду индексацию (%d/%d)",
+            "[%s] concentration: только %d токен-аккаунтов — жду покупателей (%d/%d)",
             mint, len(accounts), attempts, settings.das_retries,
         )
         await asyncio.sleep(settings.das_retry_delay)
-        accounts = await helius.get_token_accounts(mint, limit=100)
+        accounts = await helius.get_token_largest_accounts(mint)
     if len(accounts) < settings.das_min_accounts:
         log.info(
-            "[%s] concentration: DAS так и вернул %d аккаунтов — данные неполные",
+            "[%s] concentration: всего %d токен-аккаунтов — данных мало",
             mint, len(accounts),
         )
         return "incomplete", [], 0.0
 
-    # DAS getTokenAccounts и getTokenSupply оба отдают amount в сырых единицах,
-    # поэтому доля считается напрямую от полного supply.
+    owners_map = await helius.get_accounts_owners(
+        [acc.get("address") for acc in accounts if acc.get("address")]
+    )
     holders: list[tuple[str, float]] = []
     for acc in accounts:
-        owner = acc.get("owner")
+        owner = owners_map.get(acc.get("address"))
         raw_amount = acc.get("amount")
         if owner is None or raw_amount is None:
             continue

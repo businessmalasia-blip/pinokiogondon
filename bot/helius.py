@@ -157,28 +157,37 @@ class HeliusClient:
             ],
         )
 
-    async def get_token_supply(self, mint: str) -> Optional[tuple[int, int]]:
-        """Полный supply токена: (amount в сырых единицах, decimals)."""
-        result = await self.request("getTokenSupply", [mint])
-        if not result or not result.get("value"):
-            return None
-        value = result["value"]
-        try:
-            return int(value["amount"]), int(value["decimals"])
-        except (KeyError, ValueError):
-            return None
+    async def get_token_largest_accounts(self, mint: str) -> list[dict]:
+        """Топ-20 крупнейших токен-аккаунтов минта.
 
-    # ----- DAS-методы -----
-
-    async def get_token_accounts(self, mint: str, limit: int = 100) -> list[dict]:
-        """Топ токен-аккаунтов через Helius DAS getTokenAccounts (POST)."""
+        В отличие от DAS, отвечает текущим состоянием сети без задержки
+        индексации — работает даже для токена возрастом в секунды.
+        Элементы: {"address": ..., "amount": "<raw>", ...}.
+        """
         result = await self.request(
-            "getTokenAccounts",
-            {"mint": mint, "limit": limit, "page": 1, "options": {"showZeroBalance": False}},
+            "getTokenLargestAccounts", [mint, {"commitment": "confirmed"}]
         )
         if not result:
             return []
-        return result.get("token_accounts", [])
+        return result.get("value") or []
+
+    async def get_accounts_owners(self, addresses: list[str]) -> dict[str, str]:
+        """Владельцы токен-аккаунтов одним запросом getMultipleAccounts."""
+        if not addresses:
+            return {}
+        result = await self.request(
+            "getMultipleAccounts",
+            [addresses, {"encoding": "jsonParsed", "commitment": "confirmed"}],
+        )
+        owners: dict[str, str] = {}
+        for address, value in zip(addresses, (result or {}).get("value") or []):
+            try:
+                owners[address] = value["data"]["parsed"]["info"]["owner"]
+            except (TypeError, KeyError):
+                continue
+        return owners
+
+    # ----- DAS-методы -----
 
     async def get_asset(self, mint: str) -> Optional[dict]:
         """Метаданные токена (название, тикер, картинка) через DAS getAsset."""

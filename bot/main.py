@@ -111,13 +111,15 @@ async def wait_for_mc_range(
 # Пайплайн анализа токена
 # ---------------------------------------------------------------------------
 
-async def analyze_token(ctx: Context, mint: str, bonding_curve: str) -> None:
+async def analyze_token(
+    ctx: Context, mint: str, bonding_curve: str, raw_supply: int
+) -> None:
     s = ctx.settings
     log.info("[%s] 🔎 запускаю анализ (bonding curve %s)", mint, bonding_curve)
 
     # Фильтр 1: концентрация
     conc_status, holders, top10_percent = await check_concentration(
-        mint, ctx.helius, s, bonding_curve
+        mint, ctx.helius, s, bonding_curve, raw_supply
     )
     if conc_status == "incomplete":
         # Helius ещё не проиндексировал токен — это не вердикт фильтра.
@@ -307,25 +309,33 @@ def screen_buy_events(ctx: Context, logs: list[str]) -> list[tuple[str, float]]:
     return candidates
 
 
-async def resolve_bonding_curve(ctx: Context, mint: str, signature: str) -> Optional[str]:
-    """Определяет адрес bonding curve токена.
+async def _fetch_curve_state(ctx: Context, address: str) -> Optional[dict]:
+    value = await ctx.helius.get_account_info(address)
+    data_field = (value or {}).get("data")
+    if not (isinstance(data_field, list) and data_field and data_field[0]):
+        return None
+    try:
+        return parse_bonding_curve_state(base64.b64decode(data_field[0]))
+    except (ValueError, TypeError):
+        return None
+
+
+async def resolve_bonding_curve(
+    ctx: Context, mint: str, signature: str
+) -> tuple[Optional[str], Optional[dict]]:
+    """Определяет адрес bonding curve токена и её состояние.
 
     Основной путь — PDA-деривация из минта (без гаданий по транзакции)
     с проверкой аккаунта по дискриминатору. Запасной — разбор инструкции
     buy из транзакции (на случай нестандартных вариантов программы).
+    Состояние кривой отдаётся дальше: в нём supply для фильтра концентрации.
     """
     s = ctx.settings
     derived = derive_bonding_curve(mint, s.pump_program)
     if derived:
-        value = await ctx.helius.get_account_info(derived)
-        data_field = (value or {}).get("data")
-        if isinstance(data_field, list) and data_field and data_field[0]:
-            try:
-                state = parse_bonding_curve_state(base64.b64decode(data_field[0]))
-            except (ValueError, TypeError):
-                state = None
-            if state:
-                return derived
+        state = await _fetch_curve_state(ctx, derived)
+        if state:
+            return derived, state
         log.info("[%s] PDA кривой не подтвердился — пробую через транзакцию", mint)
 
     tx = await ctx.helius.get_transaction(signature)
@@ -335,7 +345,7 @@ async def resolve_bonding_curve(ctx: Context, mint: str, signature: str) -> Opti
         tx = await ctx.helius.get_transaction(signature)
     if not tx or (tx.get("meta") or {}).get("err"):
         log.warning("[%s] ⚠️ не удалось получить транзакцию %s…", mint, signature[:16])
-        return None
+        return None, None
     ctx.stats.bump("tx_checked")
     parsed = find_buy_accounts(
         tx, s.pump_program, s.buy_mint_index, s.buy_bonding_curve_index,
@@ -343,8 +353,9 @@ async def resolve_bonding_curve(ctx: Context, mint: str, signature: str) -> Opti
     )
     if not parsed:
         log.warning("[%s] ⚠️ buy-инструкция не найдена в транзакции", mint)
-        return None
-    return parsed[1]
+        return None, None
+    bonding_curve = parsed[1]
+    return bonding_curve, await _fetch_curve_state(ctx, bonding_curve)
 
 
 async def candidate_worker(ctx: Context) -> None:
@@ -357,7 +368,7 @@ async def candidate_worker(ctx: Context) -> None:
                 "[%s] 💵 MC $%.0f (из события) в диапазоне — токен идёт на анализ",
                 mint, event_mc,
             )
-            bonding_curve = await resolve_bonding_curve(ctx, mint, signature)
+            bonding_curve, curve_state = await resolve_bonding_curve(ctx, mint, signature)
             if not bonding_curve:
                 # Короткий бан вместо мгновенного повтора, иначе токен
                 # зацикливается: каждая новая покупка возвращает его в очередь
@@ -367,7 +378,8 @@ async def candidate_worker(ctx: Context) -> None:
                 )
                 await ctx.redis.set(f"seen:{mint}", "1", ex=s.analysis_retry_ttl)
                 continue
-            await analyze_token(ctx, mint, bonding_curve)
+            raw_supply = (curve_state or {}).get("token_total_supply", 0)
+            await analyze_token(ctx, mint, bonding_curve, raw_supply)
         except asyncio.CancelledError:
             raise
         except Exception:
