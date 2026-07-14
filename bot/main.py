@@ -20,13 +20,7 @@ from aiogram.enums import ParseMode
 from aiogram.types import BotCommand
 from redis.asyncio import Redis
 
-from .alerts import (
-    build_alert_text,
-    extract_socials,
-    extract_token_meta,
-    send_alert,
-    send_startup_message,
-)
+from .alerts import build_alert_text, extract_token_meta, send_alert, send_startup_message
 from .commands import router as commands_router
 from .config import Settings, load_settings
 from .filters import (
@@ -37,15 +31,7 @@ from .filters import (
 )
 from .scoring import calculate_score
 from .helius import HeliusClient
-from .jupiter import (
-    get_token_info,
-    token_age_seconds,
-    token_holder_count,
-    token_liquidity,
-    token_price,
-    token_trade_counts,
-    token_volume_24h,
-)
+from .jupiter import get_token_info, token_price
 from .outcomes import outcomes_loop
 from .prices import get_market_cap, get_sol_price, sol_price_loop
 from .pump import (
@@ -84,15 +70,8 @@ async def market_cap(ctx: Context, bonding_curve: str) -> Optional[float]:
 async def wait_for_mc_range(
     ctx: Context, mint: str, bonding_curve: str, timeout: Optional[float] = None
 ) -> Optional[float]:
-    """Опрашивает bonding curve, пока капа не окажется в допустимом для
-    отправки диапазоне [ALERT_MC_MIN, SEND_GUARD_MC_MAX].
-
-    Верхняя граница — это guard, а не узкий ALERT_MC_MAX: токен уже прошёл
-    все фильтры, и если за время анализа он проскочил $12k и стоит на $12.7k
-    (в пределах guard), алерт должен уйти сразу, а не ждать, пока капа
-    «опустится» обратно. Раньше такие качественные токены зависали до
-    таймаута (в /stats — десятки «прошли фильтры, но капа не вошла в окно»).
-    """
+    """Каждые MC_POLL_INTERVAL секунд опрашивает bonding curve, пока капа
+    не войдёт в диапазон [ALERT_MC_MIN, ALERT_MC_MAX] или не истечёт таймаут."""
     s = ctx.settings
     if timeout is None:
         timeout = s.mc_wait_timeout
@@ -103,8 +82,8 @@ async def wait_for_mc_range(
     progress_every = max(1, int(30 / s.mc_poll_interval))
     while time.monotonic() < deadline:
         mc = await market_cap(ctx, bonding_curve)
-        if mc is not None and s.alert_mc_min <= mc <= s.send_guard_mc_max:
-            log.info("[%s] 🎯 капа в диапазоне отправки: $%.0f", mint, mc)
+        if mc is not None and s.alert_mc_min <= mc <= s.alert_mc_max:
+            log.info("[%s] 🎯 капа вошла в диапазон: $%.0f", mint, mc)
             return mc
         if (
             mc is not None
@@ -120,7 +99,7 @@ async def wait_for_mc_range(
         if poll_count % progress_every == 0:
             log.info(
                 "[%s] ⏳ жду диапазон $%.0f–$%.0f, сейчас MC %s",
-                mint, s.alert_mc_min, s.send_guard_mc_max,
+                mint, s.alert_mc_min, s.alert_mc_max,
                 f"${mc:,.0f}" if mc is not None else "н/д",
             )
         await asyncio.sleep(s.mc_poll_interval)
@@ -205,7 +184,7 @@ async def analyze_token(
     # Все фильтры и скоринг пройдены
     log.info(
         "[%s] 🎯 ВСЕ ФИЛЬТРЫ ПРОЙДЕНЫ (score %.1f) — жду капу $%.0f–$%.0f",
-        mint, score["total"], s.alert_mc_min, s.send_guard_mc_max,
+        mint, score["total"], s.alert_mc_min, s.alert_mc_max,
     )
     await ctx.stats.record_filter_result(mint, "passed")
 
@@ -254,14 +233,16 @@ async def wait_and_alert(
             await ctx.redis.set(f"seen:{mint}", "1", ex=s.analysis_retry_ttl)
             return
 
+        # Дедуп: одна монета — один алерт (в пределах ALERT_DEDUP_TTL).
+        # Иначе токен, зависший в окне капы, перезаливается каждый час.
+        if not await ctx.redis.set(
+            f"alerted:{mint}", "1", ex=s.alert_dedup_ttl, nx=True
+        ):
+            log.info("[%s] алерт пропущен: уже отправляли недавно", mint)
+            return
+
         asset = await ctx.helius.get_asset(mint)
         name, symbol, image_url = extract_token_meta(asset)
-        socials = extract_socials(asset)
-
-        # Доп. данные для карточки (holders, liq, объём, возраст, сделки).
-        # Свежий токен Jupiter может ещё не видеть — все поля опциональны.
-        info = await get_token_info(ctx.http, mint)
-
         text = build_alert_text(
             name=name,
             symbol=symbol,
@@ -273,18 +254,13 @@ async def wait_and_alert(
             bundle_percent=alert_data["bundle_percent"],
             score=alert_data["score"],
             market_cap=final_mc,
-            liquidity=token_liquidity(info),
-            holders=token_holder_count(info),
-            volume=token_volume_24h(info) or None,
-            trades=token_trade_counts(info),
-            age_seconds=token_age_seconds(info),
-            socials=socials,
         )
         await send_alert(ctx.tg_bot, s.telegram_chat_id, text, image_url)
         log.info("[%s] 🔔 алерт отправлен, MC $%.0f", mint, final_mc)
 
         # Фиксируем алерт для /stats и /last; цену берём из Jupiter,
         # при её отсутствии — оценку из капы (supply Pump.fun = 1 млрд)
+        info = await get_token_info(ctx.http, mint)
         price = token_price(info) or final_mc / 1e9
         await ctx.stats.record_alert(mint, name, symbol, final_mc, price)
     finally:

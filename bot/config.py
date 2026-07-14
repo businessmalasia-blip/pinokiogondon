@@ -68,7 +68,6 @@ class Settings:
     score_weight_msr: float
     score_weight_concentration: float
     score_weight_bundle: float
-    dev_unknown_neutral: bool
 
     # Фильтр 3: дев
     msr_min_percent: float
@@ -86,6 +85,7 @@ class Settings:
     das_retry_delay: float
     das_retries: int
     analysis_retry_ttl: int
+    alert_dedup_ttl: int
     log_level: str
 
     @property
@@ -137,7 +137,6 @@ def load_settings() -> Settings:
         score_weight_msr=float(os.getenv("SCORE_WEIGHT_MSR", "0.25")),
         score_weight_concentration=float(os.getenv("SCORE_WEIGHT_CONCENTRATION", "0.25")),
         score_weight_bundle=float(os.getenv("SCORE_WEIGHT_BUNDLE", "0.20")),
-        dev_unknown_neutral=os.getenv("DEV_UNKNOWN_NEUTRAL", "true").lower() == "true",
         msr_min_percent=float(os.getenv("MSR_MIN_PERCENT", "70")),
         dev_min_tokens=int(os.getenv("DEV_MIN_TOKENS", "3")),
         dev_history_days=int(os.getenv("DEV_HISTORY_DAYS", "30")),
@@ -151,5 +150,6 @@ def load_settings() -> Settings:
         das_retry_delay=float(os.getenv("DAS_RETRY_DELAY", "12")),
         das_retries=int(os.getenv("DAS_RETRIES", "2")),
         analysis_retry_ttl=int(os.getenv("ANALYSIS_RETRY_TTL", "180")),
+        alert_dedup_ttl=int(os.getenv("ALERT_DEDUP_TTL", "86400")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
     )

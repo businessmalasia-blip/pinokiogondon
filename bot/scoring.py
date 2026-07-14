@@ -29,14 +29,10 @@ def _msr_score(msr: Optional[float]) -> int:
 
 
 def _concentration_score(top10_percent: float) -> int:
-    # Брекеты выровнены с фильтром концентрации (топ-10 пропускается до 25%),
-    # иначе токены с топ-10 15–25% проходят фильтр и умирают на скоре с 0.
     if top10_percent < 10:
         return 10
     if top10_percent <= 15:
         return 7
-    if top10_percent <= 25:
-        return 4
     return 0
 
 
@@ -59,34 +55,16 @@ def calculate_score(token_data: dict, settings: Settings) -> dict:
     }
     Возвращает суб-скоры и взвешенный total (веса из .env).
     """
-    msr_value = token_data.get("msr")
     human = _human_score(token_data["human_percent"])
-    msr = _msr_score(msr_value)
+    msr = _msr_score(token_data.get("msr"))
     concentration = _concentration_score(token_data["top10_percent"])
     bundle = _bundle_score(token_data["bundle_percent"])
 
-    w_human = settings.score_weight_human
-    w_msr = settings.score_weight_msr
-    w_conc = settings.score_weight_concentration
-    w_bundle = settings.score_weight_bundle
-
-    # Unknown-дев (нет истории токенов) — это не «плохой» дев, а «неизвестный».
-    # Штрафовать его нулём за MSR = держать потолок 7.5 для почти всех
-    # памп-токенов. Вместо этого исключаем MSR и раскидываем его вес на три
-    # остальные метрики пропорционально. Bad-дев по-прежнему даёт 0 за MSR.
-    if msr_value is None and settings.dev_unknown_neutral:
-        base = w_human + w_conc + w_bundle
-        if base > 0:
-            w_human += w_msr * w_human / base
-            w_conc += w_msr * w_conc / base
-            w_bundle += w_msr * w_bundle / base
-        w_msr = 0.0
-
     total = (
-        human * w_human
-        + msr * w_msr
-        + concentration * w_conc
-        + bundle * w_bundle
+        human * settings.score_weight_human
+        + msr * settings.score_weight_msr
+        + concentration * settings.score_weight_concentration
+        + bundle * settings.score_weight_bundle
     )
     return {
         "human": human,
