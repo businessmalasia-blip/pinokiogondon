@@ -111,11 +111,89 @@ async def wait_for_mc_range(
 # Пайплайн анализа токена
 # ---------------------------------------------------------------------------
 
+def _last_tx_time(signatures: list[dict]) -> Optional[float]:
+    """blockTime самой свежей транзакции (getSignaturesForAddress отдаёт
+    список от новых к старым)."""
+    for sig in signatures:
+        bt = sig.get("blockTime")
+        if bt:
+            return float(bt)
+    return None
+
+
+def _token_age_seconds(
+    asset: Optional[dict], signatures: list[dict]
+) -> Optional[float]:
+    """Возраст токена в секундах.
+
+    Приоритет — created_at из getAsset; если его нет, берётся blockTime
+    самой старой из известных транзакций, но только когда история не
+    обрезана лимитом (иначе о возрасте судить нельзя — токен активный).
+    """
+    from datetime import datetime, timezone
+
+    created = None
+    if asset:
+        # DAS кладёт время создания в разных местах в зависимости от версии
+        created = asset.get("created_at")
+        content = asset.get("content") or {}
+        metadata = content.get("metadata") or {}
+        created = created or metadata.get("created_at")
+    if created:
+        try:
+            if isinstance(created, (int, float)):
+                return max(0.0, datetime.now(timezone.utc).timestamp() - float(created))
+            dt = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
+            return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds())
+        except (ValueError, AttributeError):
+            pass
+
+    # Фоллбэк по сигнатурам — только если история полная (< лимита)
+    if signatures and len(signatures) < 1000:
+        oldest = next(
+            (s.get("blockTime") for s in reversed(signatures) if s.get("blockTime")),
+            None,
+        )
+        if oldest:
+            return max(0.0, time.time() - float(oldest))
+    return None
+
+
 async def analyze_token(
     ctx: Context, mint: str, bonding_curve: str, raw_supply: int
 ) -> None:
     s = ctx.settings
     log.info("[%s] 🔎 запускаю анализ (bonding curve %s)", mint, bonding_curve)
+
+    # Сигнатуры минта: один запрос, дальше переиспользуется предпроверками,
+    # бандл-метрикой и check_dev (никаких повторных вызовов)
+    mint_signatures = await ctx.helius.get_signatures(mint, limit=1000)
+
+    # Имя/тикер/картинка + created_at одним getAsset (кэшируем для алерта)
+    asset = await ctx.helius.get_asset(mint)
+    name, symbol, image_url = extract_token_meta(asset)
+
+    # --- Предварительная проверка 2.1: возраст токена ---
+    age = _token_age_seconds(asset, mint_signatures)
+    if age is not None and age > s.max_token_age_hours * 3600:
+        log.info(
+            "[%s] ❌ ОТСЕЯН: возраст %.1fч > %.0fч",
+            mint, age / 3600, s.max_token_age_hours,
+        )
+        await ctx.stats.record_filter_result(mint, "age")
+        await ctx.redis.set(f"seen:{mint}", "1", ex=s.seen_mint_ttl)
+        return
+
+    # --- Предварительная проверка 2.2: активность (последняя сделка) ---
+    last_ts = _last_tx_time(mint_signatures)
+    if last_ts is not None and (time.time() - last_ts) > s.max_inactive_seconds:
+        log.info(
+            "[%s] ❌ ОТСЕЯН: последняя сделка %.0f сек назад > %.0f",
+            mint, time.time() - last_ts, s.max_inactive_seconds,
+        )
+        await ctx.stats.record_filter_result(mint, "inactive")
+        await ctx.redis.set(f"seen:{mint}", "1", ex=s.analysis_retry_ttl)
+        return
 
     # Фильтр 1: концентрация
     conc_status, holders, top10_percent = await check_concentration(
@@ -145,9 +223,6 @@ async def analyze_token(
         holders, ctx.redis, ctx.helius, s, mint
     )
     log.info("[%s] 👥 HUMAN %.0f%%", mint, human_percent)
-
-    # Сигнатуры минта: один запрос, используется бандл-метрикой и check_dev
-    mint_signatures = await ctx.helius.get_signatures(mint, limit=1000)
 
     # Бандлы: доля покупок в слоте создания токена (снайперы на запуске)
     bundle_percent = calculate_bundle_percent(mint_signatures, s.bundle_slot_window)
@@ -190,6 +265,9 @@ async def analyze_token(
 
     alert_data = {
         "bonding_curve": bonding_curve,
+        "name": name,
+        "symbol": symbol,
+        "image_url": image_url,
         "human_percent": human_percent,
         "dev_status": dev["status"],
         "msr": dev["msr"],
@@ -241,8 +319,10 @@ async def wait_and_alert(
             log.info("[%s] алерт пропущен: уже отправляли недавно", mint)
             return
 
-        asset = await ctx.helius.get_asset(mint)
-        name, symbol, image_url = extract_token_meta(asset)
+        # Имя/тикер/картинка кэшированы на этапе анализа (getAsset не повторяем)
+        name = alert_data.get("name", "Unknown")
+        symbol = alert_data.get("symbol", "?")
+        image_url = alert_data.get("image_url")
         text = build_alert_text(
             name=name,
             symbol=symbol,

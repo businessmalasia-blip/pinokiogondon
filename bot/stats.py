@@ -19,7 +19,7 @@ OUTCOME_WINDOWS = (("1h", 3600), ("6h", 21600))
 # Задержка проверки градуации для отсеянных/прошедших токенов
 GRADCHECK_DELAY = 86400
 
-FILTER_NAMES = ("concentration", "score", "passed")
+FILTER_NAMES = ("age", "inactive", "concentration", "score", "passed")
 
 
 class Stats:

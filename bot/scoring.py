@@ -29,9 +29,11 @@ def _msr_score(msr: Optional[float]) -> int:
 
 
 def _concentration_score(top10_percent: float) -> int:
+    # Брекеты по ТЗ: топ-10 10–25% даёт 7 баллов (фильтр пропускает до 25%,
+    # иначе токены 15–25% проходят фильтр и умирают на скоре с нулём).
     if top10_percent < 10:
         return 10
-    if top10_percent <= 15:
+    if top10_percent <= 25:
         return 7
     return 0
 

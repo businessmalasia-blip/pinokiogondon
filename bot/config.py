@@ -39,6 +39,10 @@ class Settings:
     mc_wait_timeout: float
     mc_wait_abort_below: float
 
+    # Предварительные проверки
+    max_token_age_hours: float
+    max_inactive_seconds: float
+
     # Цена SOL
     sol_price_interval: float
 
@@ -117,6 +121,8 @@ def load_settings() -> Settings:
         mc_poll_interval=float(os.getenv("MC_POLL_INTERVAL", "2")),
         mc_wait_timeout=float(os.getenv("MC_WAIT_TIMEOUT", "1200")),
         mc_wait_abort_below=float(os.getenv("MC_WAIT_ABORT_BELOW", "6000")),
+        max_token_age_hours=float(os.getenv("MAX_TOKEN_AGE_HOURS", "6")),
+        max_inactive_seconds=float(os.getenv("MAX_INACTIVE_SECONDS", "300")),
         sol_price_interval=float(os.getenv("SOL_PRICE_INTERVAL", "2")),
         helius_rate_limit=float(os.getenv("HELIUS_RATE_LIMIT", "0.25")),
         bonding_curve_exclude_percent=float(

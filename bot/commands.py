@@ -13,6 +13,8 @@ router = Router()
 STREAM_ALIVE_THRESHOLD = 30
 
 FILTER_ROWS = (
+    ("age", "отсеяно"),
+    ("inactive", "отсеяно"),
     ("concentration", "отсеяно"),
     ("score", "отсеяно"),
     ("passed", "прошло"),
@@ -132,6 +134,7 @@ async def cmd_settings(message: Message, ctx) -> None:
     s = ctx.settings
     text = (
         "⚙️ <b>Текущие пороги</b>\n"
+        f"Возраст: ≤ {s.max_token_age_hours:.0f}ч | Активность: ≤ {s.max_inactive_seconds:.0f}с\n"
         f"Капа для анализа: ≥ ${s.mc_analyze_min:,.0f}\n"
         f"Диапазон алерта: ${s.alert_mc_min:,.0f}–${s.alert_mc_max:,.0f}\n"
         f"Guard при отправке: ${s.send_guard_mc_min:,.0f}–${s.send_guard_mc_max:,.0f}\n"
