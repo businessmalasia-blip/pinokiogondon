@@ -68,6 +68,7 @@ class Settings:
     score_weight_msr: float
     score_weight_concentration: float
     score_weight_bundle: float
+    dev_unknown_neutral: bool
 
     # Фильтр 3: дев
     msr_min_percent: float
@@ -136,6 +137,7 @@ def load_settings() -> Settings:
         score_weight_msr=float(os.getenv("SCORE_WEIGHT_MSR", "0.25")),
         score_weight_concentration=float(os.getenv("SCORE_WEIGHT_CONCENTRATION", "0.25")),
         score_weight_bundle=float(os.getenv("SCORE_WEIGHT_BUNDLE", "0.20")),
+        dev_unknown_neutral=os.getenv("DEV_UNKNOWN_NEUTRAL", "true").lower() == "true",
         msr_min_percent=float(os.getenv("MSR_MIN_PERCENT", "70")),
         dev_min_tokens=int(os.getenv("DEV_MIN_TOKENS", "3")),
         dev_history_days=int(os.getenv("DEV_HISTORY_DAYS", "30")),

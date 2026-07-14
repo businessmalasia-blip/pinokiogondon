@@ -70,8 +70,15 @@ async def market_cap(ctx: Context, bonding_curve: str) -> Optional[float]:
 async def wait_for_mc_range(
     ctx: Context, mint: str, bonding_curve: str, timeout: Optional[float] = None
 ) -> Optional[float]:
-    """Каждые MC_POLL_INTERVAL секунд опрашивает bonding curve, пока капа
-    не войдёт в диапазон [ALERT_MC_MIN, ALERT_MC_MAX] или не истечёт таймаут."""
+    """Опрашивает bonding curve, пока капа не окажется в допустимом для
+    отправки диапазоне [ALERT_MC_MIN, SEND_GUARD_MC_MAX].
+
+    Верхняя граница — это guard, а не узкий ALERT_MC_MAX: токен уже прошёл
+    все фильтры, и если за время анализа он проскочил $12k и стоит на $12.7k
+    (в пределах guard), алерт должен уйти сразу, а не ждать, пока капа
+    «опустится» обратно. Раньше такие качественные токены зависали до
+    таймаута (в /stats — десятки «прошли фильтры, но капа не вошла в окно»).
+    """
     s = ctx.settings
     if timeout is None:
         timeout = s.mc_wait_timeout
@@ -82,8 +89,8 @@ async def wait_for_mc_range(
     progress_every = max(1, int(30 / s.mc_poll_interval))
     while time.monotonic() < deadline:
         mc = await market_cap(ctx, bonding_curve)
-        if mc is not None and s.alert_mc_min <= mc <= s.alert_mc_max:
-            log.info("[%s] 🎯 капа вошла в диапазон: $%.0f", mint, mc)
+        if mc is not None and s.alert_mc_min <= mc <= s.send_guard_mc_max:
+            log.info("[%s] 🎯 капа в диапазоне отправки: $%.0f", mint, mc)
             return mc
         if (
             mc is not None
@@ -99,7 +106,7 @@ async def wait_for_mc_range(
         if poll_count % progress_every == 0:
             log.info(
                 "[%s] ⏳ жду диапазон $%.0f–$%.0f, сейчас MC %s",
-                mint, s.alert_mc_min, s.alert_mc_max,
+                mint, s.alert_mc_min, s.send_guard_mc_max,
                 f"${mc:,.0f}" if mc is not None else "н/д",
             )
         await asyncio.sleep(s.mc_poll_interval)
@@ -184,7 +191,7 @@ async def analyze_token(
     # Все фильтры и скоринг пройдены
     log.info(
         "[%s] 🎯 ВСЕ ФИЛЬТРЫ ПРОЙДЕНЫ (score %.1f) — жду капу $%.0f–$%.0f",
-        mint, score["total"], s.alert_mc_min, s.alert_mc_max,
+        mint, score["total"], s.alert_mc_min, s.send_guard_mc_max,
     )
     await ctx.stats.record_filter_result(mint, "passed")
 
