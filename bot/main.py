@@ -80,21 +80,34 @@ async def wait_for_mc_range(
     deadline = time.monotonic() + timeout
     poll_count = 0
     progress_every = max(1, int(30 / s.mc_poll_interval))
+    # Момент, когда капа впервые ушла ниже порога слива. Пока она ниже —
+    # ждём камбэк MC_COMEBACK_WAIT секунд; если восстановилась выше порога,
+    # таймер сбрасывается. Так дамп-и-возврат ловится, а мёртвый токен всё
+    # равно бросается через 5 минут, а не висит весь таймаут.
+    dumped_since: Optional[float] = None
     while time.monotonic() < deadline:
         mc = await market_cap(ctx, bonding_curve)
         if mc is not None and s.alert_mc_min <= mc <= s.alert_mc_max:
             log.info("[%s] 🎯 капа вошла в диапазон: $%.0f", mint, mc)
             return mc
-        if (
-            mc is not None
-            and s.mc_wait_abort_below > 0
-            and mc < s.mc_wait_abort_below
-        ):
-            log.info(
-                "[%s] 🛑 ожидание прервано: капа $%.0f упала ниже $%.0f — токен слит",
-                mint, mc, s.mc_wait_abort_below,
-            )
-            return None
+        if mc is not None and s.mc_wait_abort_below > 0:
+            if mc < s.mc_wait_abort_below:
+                if dumped_since is None:
+                    dumped_since = time.monotonic()
+                    log.info(
+                        "[%s] 📉 капа $%.0f ниже $%.0f — жду камбэк %.0f сек",
+                        mint, mc, s.mc_wait_abort_below, s.mc_comeback_wait,
+                    )
+                elif time.monotonic() - dumped_since > s.mc_comeback_wait:
+                    log.info(
+                        "[%s] 🛑 ожидание прервано: капа $%.0f не вернулась за %.0f сек — токен слит",
+                        mint, mc, s.mc_comeback_wait,
+                    )
+                    return None
+            elif dumped_since is not None:
+                # Капа восстановилась выше порога слива — камбэк, ждём дальше
+                log.info("[%s] 📈 капа вернулась к $%.0f — продолжаю ждать окно", mint, mc)
+                dumped_since = None
         poll_count += 1
         if poll_count % progress_every == 0:
             log.info(
