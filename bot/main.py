@@ -20,7 +20,13 @@ from aiogram.enums import ParseMode
 from aiogram.types import BotCommand
 from redis.asyncio import Redis
 
-from .alerts import build_alert_text, extract_token_meta, send_alert, send_startup_message
+from .alerts import (
+    build_alert_text,
+    extract_socials,
+    extract_token_meta,
+    send_alert,
+    send_startup_message,
+)
 from .commands import router as commands_router
 from .config import Settings, load_settings
 from .filters import (
@@ -31,7 +37,15 @@ from .filters import (
 )
 from .scoring import calculate_score
 from .helius import HeliusClient
-from .jupiter import get_token_info, token_price
+from .jupiter import (
+    get_token_info,
+    token_age_seconds,
+    token_holder_count,
+    token_liquidity,
+    token_price,
+    token_trade_counts,
+    token_volume_24h,
+)
 from .outcomes import outcomes_loop
 from .prices import get_market_cap, get_sol_price, sol_price_loop
 from .pump import (
@@ -242,6 +256,12 @@ async def wait_and_alert(
 
         asset = await ctx.helius.get_asset(mint)
         name, symbol, image_url = extract_token_meta(asset)
+        socials = extract_socials(asset)
+
+        # Доп. данные для карточки (holders, liq, объём, возраст, сделки).
+        # Свежий токен Jupiter может ещё не видеть — все поля опциональны.
+        info = await get_token_info(ctx.http, mint)
+
         text = build_alert_text(
             name=name,
             symbol=symbol,
@@ -253,13 +273,18 @@ async def wait_and_alert(
             bundle_percent=alert_data["bundle_percent"],
             score=alert_data["score"],
             market_cap=final_mc,
+            liquidity=token_liquidity(info),
+            holders=token_holder_count(info),
+            volume=token_volume_24h(info) or None,
+            trades=token_trade_counts(info),
+            age_seconds=token_age_seconds(info),
+            socials=socials,
         )
         await send_alert(ctx.tg_bot, s.telegram_chat_id, text, image_url)
         log.info("[%s] 🔔 алерт отправлен, MC $%.0f", mint, final_mc)
 
         # Фиксируем алерт для /stats и /last; цену берём из Jupiter,
         # при её отсутствии — оценку из капы (supply Pump.fun = 1 млрд)
-        info = await get_token_info(ctx.http, mint)
         price = token_price(info) or final_mc / 1e9
         await ctx.stats.record_alert(mint, name, symbol, final_mc, price)
     finally:
