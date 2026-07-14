@@ -16,6 +16,8 @@ FILTER_ROWS = (
     ("age", "отсеяно"),
     ("inactive", "отсеяно"),
     ("concentration", "отсеяно"),
+    ("dev", "отсеяно"),
+    ("human_strict", "отсеяно"),
     ("score", "отсеяно"),
     ("passed", "прошло"),
 )

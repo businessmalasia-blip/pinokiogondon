@@ -85,8 +85,19 @@ async def wait_for_mc_range(
     # таймер сбрасывается. Так дамп-и-возврат ловится, а мёртвый токен всё
     # равно бросается через 5 минут, а не висит весь таймаут.
     dumped_since: Optional[float] = None
+    last_fresh_at = time.monotonic()
     while time.monotonic() < deadline:
         mc = await market_cap(ctx, bonding_curve)
+        if mc is not None:
+            last_fresh_at = time.monotonic()
+        elif time.monotonic() - last_fresh_at > s.mc_stale_timeout:
+            # getAccountInfo завис/не отдаёт баланс дольше порога — не рискуем
+            # отправлять алерт по устаревшей капе
+            log.info(
+                "[%s] 🛑 капа не обновлялась > %.0f сек — прекращаю ожидание",
+                mint, s.mc_stale_timeout,
+            )
+            return None
         if mc is not None and s.alert_mc_min <= mc <= s.alert_mc_max:
             log.info("[%s] 🎯 капа вошла в диапазон: $%.0f", mint, mc)
             return mc
@@ -139,9 +150,12 @@ def _token_age_seconds(
 ) -> Optional[float]:
     """Возраст токена в секундах.
 
-    Приоритет — created_at из getAsset; если его нет, берётся blockTime
-    самой старой из известных транзакций, но только когда история не
-    обрезана лимитом (иначе о возрасте судить нельзя — токен активный).
+    Приоритет — created_at из getAsset (у pump-токенов обычно отсутствует).
+    Иначе — blockTime самой старой из полученных сигнатур минта. Если
+    история обрезана лимитом (1000), это НИЖНЯЯ граница возраста: если уже
+    она > порога, токен точно старый и отсекается; если меньше — токен
+    активный и молодой, пропускаем. Так старые дохлые токены (мало
+    транзакций → история полная → точный возраст) ловятся надёжно.
     """
     from datetime import datetime, timezone
 
@@ -161,8 +175,9 @@ def _token_age_seconds(
         except (ValueError, AttributeError):
             pass
 
-    # Фоллбэк по сигнатурам — только если история полная (< лимита)
-    if signatures and len(signatures) < 1000:
+    # Фоллбэк по сигнатурам: blockTime самой старой из полученных.
+    # Полная история (< лимита) -> точный возраст; обрезанная -> нижняя граница.
+    if signatures:
         oldest = next(
             (s.get("blockTime") for s in reversed(signatures) if s.get("blockTime")),
             None,
@@ -241,11 +256,36 @@ async def analyze_token(
     bundle_percent = calculate_bundle_percent(mint_signatures, s.bundle_slot_window)
     log.info("[%s] 📦 бандлы на запуске: %.1f%%", mint, bundle_percent)
 
-    # История дева (Bad не отсеивает — даёт 0 баллов за MSR в скоринге)
+    # История дева
     dev = await check_dev(
         mint, ctx.redis, ctx.helius, ctx.http, s, mint_signatures=mint_signatures
     )
     log.info("[%s] 👨‍💻 dev: %s, MSR %s", mint, dev["status"], dev["msr"])
+
+    # Bad-дев — мгновенный отсев, до скоринга
+    if dev["status"] == "Bad":
+        log.info("[%s] ❌ ОТСЕЯН: дев в чёрном списке (Bad)", mint)
+        await ctx.stats.record_filter_result(mint, "dev")
+        await ctx.redis.set(f"seen:{mint}", "1", ex=s.seen_mint_ttl)
+        return
+
+    # Unknown-дев (нет истории) — ужесточаем требования к HUMAN/UNKNOWN.
+    # unknown_percent = 100 - human_percent (третьего состояния нет)
+    if dev["status"] == "Unknown":
+        unknown_percent = 100.0 - human_percent
+        if (
+            human_percent < s.human_min_percent_unknown
+            or unknown_percent > s.unknown_max_percent_unknown
+        ):
+            log.info(
+                "[%s] ❌ ОТСЕЯН: Unknown-дев + HUMAN %.0f%%/UNKNOWN %.0f%% "
+                "(нужно ≥%.0f/≤%.0f)",
+                mint, human_percent, unknown_percent,
+                s.human_min_percent_unknown, s.unknown_max_percent_unknown,
+            )
+            await ctx.stats.record_filter_result(mint, "human_strict")
+            await ctx.redis.set(f"seen:{mint}", "1", ex=s.analysis_retry_ttl)
+            return
 
     # Скоринг по посчитанным метрикам — единственный решающий порог
     score = calculate_score(

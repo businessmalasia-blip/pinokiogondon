@@ -39,6 +39,7 @@ class Settings:
     mc_wait_timeout: float
     mc_wait_abort_below: float
     mc_comeback_wait: float
+    mc_stale_timeout: float
 
     # Предварительные проверки
     max_token_age_hours: float
@@ -58,6 +59,9 @@ class Settings:
     # Фильтр 2: HUMAN
     human_min_percent: float
     unknown_max_percent: float
+    # Ужесточённые пороги для Unknown-девов (защита от рагпулов)
+    human_min_percent_unknown: float
+    unknown_max_percent_unknown: float
     human_cache_ttl: int
     unknown_cache_ttl: int
     human_check_top: int
@@ -123,8 +127,9 @@ def load_settings() -> Settings:
         mc_wait_timeout=float(os.getenv("MC_WAIT_TIMEOUT", "1200")),
         mc_wait_abort_below=float(os.getenv("MC_WAIT_ABORT_BELOW", "6000")),
         mc_comeback_wait=float(os.getenv("MC_COMEBACK_WAIT", "300")),
-        max_token_age_hours=float(os.getenv("MAX_TOKEN_AGE_HOURS", "6")),
-        max_inactive_seconds=float(os.getenv("MAX_INACTIVE_SECONDS", "300")),
+        mc_stale_timeout=float(os.getenv("MC_STALE_TIMEOUT", "30")),
+        max_token_age_hours=float(os.getenv("MAX_TOKEN_AGE_HOURS", "2")),
+        max_inactive_seconds=float(os.getenv("MAX_INACTIVE_SECONDS", "120")),
         sol_price_interval=float(os.getenv("SOL_PRICE_INTERVAL", "2")),
         helius_rate_limit=float(os.getenv("HELIUS_RATE_LIMIT", "0.25")),
         bonding_curve_exclude_percent=float(
@@ -134,13 +139,15 @@ def load_settings() -> Settings:
         top10_max_percent=float(os.getenv("TOP10_MAX_PERCENT", "15")),
         human_min_percent=float(os.getenv("HUMAN_MIN_PERCENT", "45")),
         unknown_max_percent=float(os.getenv("UNKNOWN_MAX_PERCENT", "30")),
+        human_min_percent_unknown=float(os.getenv("HUMAN_MIN_PERCENT_UNKNOWN", "55")),
+        unknown_max_percent_unknown=float(os.getenv("UNKNOWN_MAX_PERCENT_UNKNOWN", "20")),
         human_cache_ttl=int(os.getenv("HUMAN_CACHE_TTL", "3600")),
         unknown_cache_ttl=int(os.getenv("UNKNOWN_CACHE_TTL", "3600")),
         human_check_top=int(os.getenv("HUMAN_CHECK_TOP", "30")),
         human_min_holder_share=float(os.getenv("HUMAN_MIN_HOLDER_SHARE", "0.5")),
         human_min_candidates=int(os.getenv("HUMAN_MIN_CANDIDATES", "10")),
         bundle_slot_window=int(os.getenv("BUNDLE_SLOT_WINDOW", "2")),
-        min_score=float(os.getenv("MIN_SCORE", "7.5")),
+        min_score=float(os.getenv("MIN_SCORE", "7.2")),
         score_weight_human=float(os.getenv("SCORE_WEIGHT_HUMAN", "0.30")),
         score_weight_msr=float(os.getenv("SCORE_WEIGHT_MSR", "0.25")),
         score_weight_concentration=float(os.getenv("SCORE_WEIGHT_CONCENTRATION", "0.25")),
