@@ -124,19 +124,16 @@ async def calculate_human_percent(
 ) -> tuple[bool, float]:
     """HUMAN — у адреса есть история транзакций; UNKNOWN — истории нет.
 
-    Для экономии кредитов Helius проверяются только топ-HUMAN_CHECK_TOP
-    холдеров по балансу, адреса с долей меньше HUMAN_MIN_HOLDER_SHARE
-    игнорируются. Некэшированные адреса запрашиваются batch-запросами
-    по 10 штук. Возвращает (прошёл ли фильтр, HUMAN-процент для алерта).
+    Взвешенный подсчёт: 1-2 tx → вес 0.5, 3+ tx → вес 1.0.
+    Проверяются только топ-HUMAN_CHECK_TOP холдеров по балансу.
+    Батч по 5 адресов, limit=3 (достаточно для определения веса).
+    Кеш: "0" = unknown, "0.5" = 1-2 tx, "1" = 3+ tx.
     """
     top = holders[: settings.human_check_top]
     candidates = [
         address for address, share in top
         if share >= settings.human_min_holder_share
     ]
-    # У хорошо распределённых токенов почти все доли ниже отсечки, и выборка
-    # вырождается в 2-4 кошелька. Добираем следующими по размеру холдерами,
-    # чтобы процент считался минимум по HUMAN_MIN_CANDIDATES адресам.
     if len(candidates) < settings.human_min_candidates:
         seen = set(candidates)
         for address, _share in top:
@@ -149,33 +146,41 @@ async def calculate_human_percent(
         log.info("[%s] human: нет холдеров для проверки", mint)
         return False, 0.0
 
-    human = 0
+    human_weight = 0.0
     unknown = 0
     to_query: list[str] = []
     for address in candidates:
         cached = await redis_client.get(f"human:{address}")
         if cached == "1":
-            human += 1
+            human_weight += 1.0
+        elif cached == "0.5":
+            human_weight += 0.5
         elif cached == "0":
             unknown += 1
         else:
             to_query.append(address)
 
-    for start in range(0, len(to_query), 10):
-        chunk = to_query[start : start + 10]
-        signatures_by_address = await helius.get_signatures_batch(chunk, limit=1)
+    # Батч по 5 адресов; limit=3 — различает 0 / 1-2 / 3+ tx
+    for start in range(0, len(to_query), 5):
+        chunk = to_query[start : start + 5]
+        signatures_by_address = await helius.get_signatures_batch(chunk, limit=3)
         pipe = redis_client.pipeline()
         for address in chunk:
-            if signatures_by_address.get(address):
-                human += 1
-                pipe.set(f"human:{address}", "1", ex=settings.human_cache_ttl)
-            else:
+            sigs = signatures_by_address.get(address) or []
+            count = len(sigs)
+            if count == 0:
                 unknown += 1
                 pipe.set(f"human:{address}", "0", ex=settings.unknown_cache_ttl)
+            elif count <= 2:
+                human_weight += 0.5
+                pipe.set(f"human:{address}", "0.5", ex=settings.human_cache_ttl)
+            else:
+                human_weight += 1.0
+                pipe.set(f"human:{address}", "1", ex=settings.human_cache_ttl)
         await pipe.execute()
 
-    total = human + unknown
-    human_percent = human / total * 100.0
+    total = len(candidates)
+    human_percent = human_weight / total * 100.0
     unknown_percent = unknown / total * 100.0
 
     passed = (
@@ -274,7 +279,7 @@ async def check_dev(
     if cached_msr is not None:
         return {"status": "Clean", "msr": float(cached_msr)}
 
-    # История дева: до DEV_TX_LIMIT транзакций за DEV_HISTORY_DAYS дней
+    # История дева: до DEV_TX_LIMIT (50) транзакций за DEV_HISTORY_DAYS дней
     signatures = await helius.get_signatures(creator, limit=settings.dev_tx_limit)
     cutoff = time.time() - settings.dev_history_days * 86400
     recent = [
@@ -282,17 +287,21 @@ async def check_dev(
         if sig.get("blockTime") and sig["blockTime"] >= cutoff and not sig.get("err")
     ]
 
+    # Батч getTransaction по 5 штук — сокращает кол-во HTTP-запросов
     created_mints: list[str] = []
-    for sig_info in recent:
-        tx = await helius.get_transaction(sig_info["signature"])
-        if not tx:
-            continue
-        logs = (tx.get("meta") or {}).get("logMessages") or []
-        if not any(settings.pump_program in line for line in logs):
-            continue
-        created = find_created_mint(tx, settings.pump_program)
-        if created and created != mint and created not in created_mints:
-            created_mints.append(created)
+    recent_sigs = [s["signature"] for s in recent]
+    for start in range(0, len(recent_sigs), 5):
+        chunk_sigs = recent_sigs[start : start + 5]
+        txs = await helius.get_transactions_batch(chunk_sigs)
+        for tx in txs:
+            if not tx:
+                continue
+            logs = (tx.get("meta") or {}).get("logMessages") or []
+            if not any(settings.pump_program in line for line in logs):
+                continue
+            created = find_created_mint(tx, settings.pump_program)
+            if created and created != mint and created not in created_mints:
+                created_mints.append(created)
 
     if len(created_mints) < settings.dev_min_tokens:
         log.info("[%s] dev %s: Unknown (%d токенов)", mint, creator, len(created_mints))
@@ -308,7 +317,7 @@ async def check_dev(
     log.info("[%s] dev %s: MSR %.1f%% (%d/%d)", mint, creator, msr, survived, len(to_check))
 
     if msr >= settings.msr_min_percent:
-        await redis_client.set(f"dev_msr:{creator}", msr)
+        await redis_client.set(f"dev_msr:{creator}", msr, ex=3600)
         return {"status": "Clean", "msr": msr}
 
     await redis_client.set(f"bad_dev:{creator}", "1")

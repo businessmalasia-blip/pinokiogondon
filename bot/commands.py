@@ -57,6 +57,8 @@ async def cmd_status(message: Message, ctx) -> None:
         else:
             stream = f"🔴 тишина ({ago:.0f} сек)"
 
+    calls_24h = ctx.helius.calls_last_24h()
+    helius_k = calls_24h // 1000
     text = (
         "🩺 <b>Статус бота</b>\n"
         f"⏱ Аптайм: {_uptime(time.time() - ctx.stats.started_at)}\n"
@@ -65,7 +67,8 @@ async def cmd_status(message: Message, ctx) -> None:
         f"🛒 Покупок замечено: {counters.get('buys_seen', 0):,}\n"
         f"🔍 Транзакций проверено: {counters.get('tx_checked', 0):,}\n"
         f"📈 Расчётов капы: {counters.get('mc_calcs', 0):,}\n"
-        f"🔔 Алертов отправлено: {counters.get('alerts_sent', 0):,}"
+        f"🔔 Алертов отправлено: {counters.get('alerts_sent', 0):,}\n"
+        f"💳 Кредиты Helius: расход ~{helius_k} тыс./сутки (лимит 1M/мес)"
     )
     await message.answer(text)
 
@@ -137,16 +140,21 @@ async def cmd_settings(message: Message, ctx) -> None:
     text = (
         "⚙️ <b>Текущие пороги</b>\n"
         f"Возраст: ≤ {s.max_token_age_hours:.0f}ч | Активность: ≤ {s.max_inactive_seconds:.0f}с\n"
+        f"Покупок за 2 мин: ≥ {s.min_buy_count_last_2min} (MIN_BUY_COUNT_LAST_2MIN)\n"
         f"Капа для анализа: ≥ ${s.mc_analyze_min:,.0f}\n"
-        f"Диапазон алерта: ${s.alert_mc_min:,.0f}–${s.alert_mc_max:,.0f}\n"
-        f"Guard при отправке: ${s.send_guard_mc_min:,.0f}–${s.send_guard_mc_max:,.0f}\n"
-        f"Холдер: ≤ {s.holder_max_percent}% | Топ-10: &lt; {s.top10_max_percent}%\n"
+        f"Диапазон алерта: ${s.alert_mc_min:,.0f}–${s.alert_mc_max:,.0f} "
+        f"(MIN_CAP_ALERT / MAX_CAP_ALERT)\n"
+        f"Guard при отправке: ${s.send_guard_mc_min:,.0f}–${s.send_guard_mc_max:,.0f} "
+        f"(GUARD_MIN_CAP / GUARD_MAX_CAP)\n"
+        f"Холдер: ≤ {s.holder_max_percent}% (MAX_SINGLE_HOLDER_PERCENT) | "
+        f"Топ-10: ≤ {s.top10_max_percent}% (MAX_TOP10_HOLDERS_PERCENT)\n"
         f"HUMAN: ≥ {s.human_min_percent:.0f}% | UNKNOWN: ≤ {s.unknown_max_percent:.0f}%\n"
         f"MSR: ≥ {s.msr_min_percent:.0f}% (мин. {s.dev_min_tokens} токенов, "
         f"{s.dev_history_days} дн.)\n"
-        f"Мин. скор: {s.min_score} (веса H {s.score_weight_human:.2f} / "
+        f"Бандлы: жёсткий порог ≤ {s.max_bundle_percent:.0f}% (MAX_BUNDLE_PERCENT)\n"
+        f"Мин. скор: {s.min_score} (MIN_SCORE) — веса H {s.score_weight_human:.2f} / "
         f"MSR {s.score_weight_msr:.2f} / C {s.score_weight_concentration:.2f} / "
-        f"B {s.score_weight_bundle:.2f})\n"
+        f"B {s.score_weight_bundle:.2f}\n"
         f"Выживший токен: объём > ${s.survivor_min_volume_usd:,.0f}"
     )
     await message.answer(text)

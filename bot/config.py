@@ -70,6 +70,8 @@ class Settings:
 
     # Бандлы
     bundle_slot_window: int
+    min_buy_count_last_2min: int
+    max_bundle_percent: float
 
     # Скоринг
     min_score: float
@@ -119,10 +121,10 @@ def load_settings() -> Settings:
         buy_bonding_curve_index=int(os.getenv("BUY_BONDING_CURVE_INDEX", "3")),
         mc_analyze_min=float(os.getenv("MC_ANALYZE_MIN", "8000")),
         mc_analyze_max=float(os.getenv("MC_ANALYZE_MAX", "13000")),
-        alert_mc_min=float(os.getenv("ALERT_MC_MIN", "10000")),
-        alert_mc_max=float(os.getenv("ALERT_MC_MAX", "12000")),
-        send_guard_mc_min=float(os.getenv("SEND_GUARD_MC_MIN", "9000")),
-        send_guard_mc_max=float(os.getenv("SEND_GUARD_MC_MAX", "13000")),
+        alert_mc_min=float(os.getenv("MIN_CAP_ALERT", "9000")),
+        alert_mc_max=float(os.getenv("MAX_CAP_ALERT", "12000")),
+        send_guard_mc_min=float(os.getenv("GUARD_MIN_CAP", "9000")),
+        send_guard_mc_max=float(os.getenv("GUARD_MAX_CAP", "13000")),
         mc_poll_interval=float(os.getenv("MC_POLL_INTERVAL", "2")),
         mc_wait_timeout=float(os.getenv("MC_WAIT_TIMEOUT", "1200")),
         mc_wait_abort_below=float(os.getenv("MC_WAIT_ABORT_BELOW", "6000")),
@@ -131,14 +133,14 @@ def load_settings() -> Settings:
         max_token_age_hours=float(os.getenv("MAX_TOKEN_AGE_HOURS", "2")),
         max_inactive_seconds=float(os.getenv("MAX_INACTIVE_SECONDS", "120")),
         sol_price_interval=float(os.getenv("SOL_PRICE_INTERVAL", "2")),
-        helius_rate_limit=float(os.getenv("HELIUS_RATE_LIMIT", "0.25")),
+        helius_rate_limit=float(os.getenv("HELIUS_RATE_LIMIT", "0.3")),
         bonding_curve_exclude_percent=float(
             os.getenv("BONDING_CURVE_EXCLUDE_PERCENT", "50")
         ),
-        holder_max_percent=float(os.getenv("HOLDER_MAX_PERCENT", "2.5")),
-        top10_max_percent=float(os.getenv("TOP10_MAX_PERCENT", "15")),
-        human_min_percent=float(os.getenv("HUMAN_MIN_PERCENT", "45")),
-        unknown_max_percent=float(os.getenv("UNKNOWN_MAX_PERCENT", "30")),
+        holder_max_percent=float(os.getenv("MAX_SINGLE_HOLDER_PERCENT", "3.0")),
+        top10_max_percent=float(os.getenv("MAX_TOP10_HOLDERS_PERCENT", "12.0")),
+        human_min_percent=float(os.getenv("HUMAN_MIN_PERCENT", "60")),
+        unknown_max_percent=float(os.getenv("UNKNOWN_MAX_PERCENT", "15")),
         human_min_percent_unknown=float(os.getenv("HUMAN_MIN_PERCENT_UNKNOWN", "55")),
         unknown_max_percent_unknown=float(os.getenv("UNKNOWN_MAX_PERCENT_UNKNOWN", "20")),
         human_cache_ttl=int(os.getenv("HUMAN_CACHE_TTL", "3600")),
@@ -147,12 +149,14 @@ def load_settings() -> Settings:
         human_min_holder_share=float(os.getenv("HUMAN_MIN_HOLDER_SHARE", "0.5")),
         human_min_candidates=int(os.getenv("HUMAN_MIN_CANDIDATES", "10")),
         bundle_slot_window=int(os.getenv("BUNDLE_SLOT_WINDOW", "2")),
-        min_score=float(os.getenv("MIN_SCORE", "7.2")),
+        min_buy_count_last_2min=int(os.getenv("MIN_BUY_COUNT_LAST_2MIN", "2")),
+        max_bundle_percent=float(os.getenv("MAX_BUNDLE_PERCENT", "20.0")),
+        min_score=float(os.getenv("MIN_SCORE", "8.0")),
         score_weight_human=float(os.getenv("SCORE_WEIGHT_HUMAN", "0.30")),
         score_weight_msr=float(os.getenv("SCORE_WEIGHT_MSR", "0.25")),
         score_weight_concentration=float(os.getenv("SCORE_WEIGHT_CONCENTRATION", "0.25")),
         score_weight_bundle=float(os.getenv("SCORE_WEIGHT_BUNDLE", "0.20")),
-        msr_min_percent=float(os.getenv("MSR_MIN_PERCENT", "70")),
+        msr_min_percent=float(os.getenv("MSR_MIN_PERCENT", "80")),
         dev_min_tokens=int(os.getenv("DEV_MIN_TOKENS", "3")),
         dev_history_days=int(os.getenv("DEV_HISTORY_DAYS", "30")),
         dev_tx_limit=int(os.getenv("DEV_TX_LIMIT", "50")),

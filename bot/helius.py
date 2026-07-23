@@ -4,6 +4,7 @@ import asyncio
 import itertools
 import logging
 import time
+from collections import deque
 from typing import Any, Optional
 
 import aiohttp
@@ -26,6 +27,27 @@ class HeliusClient:
         self._id_counter = itertools.count(1)
         # None — ещё не знаем; False — тариф Helius отверг batch, ходим одиночными
         self._batch_supported: Optional[bool] = None
+        # Скользящее окно 24ч для подсчёта кредитов Helius
+        self._call_timestamps: deque = deque()
+
+    def _record_calls(self, count: int = 1) -> None:
+        """Фиксирует count RPC-вызовов для статистики расхода кредитов."""
+        now = time.time()
+        for _ in range(count):
+            self._call_timestamps.append(now)
+        cutoff = now - 86400
+        while self._call_timestamps and self._call_timestamps[0] < cutoff:
+            self._call_timestamps.popleft()
+
+    def calls_last_24h(self) -> int:
+        """Количество RPC-вызовов за последние 24 часа."""
+        cutoff = time.time() - 86400
+        count = 0
+        for t in reversed(self._call_timestamps):
+            if t < cutoff:
+                break
+            count += 1
+        return count
 
     async def _throttle(self) -> None:
         """Гарантирует паузу между любыми запросами к Helius."""
@@ -38,6 +60,7 @@ class HeliusClient:
 
     async def request(self, method: str, params: Any) -> Any:
         await self._throttle()
+        self._record_calls(1)
         payload = {
             "jsonrpc": "2.0",
             "id": next(self._id_counter),
@@ -77,6 +100,7 @@ class HeliusClient:
         if self._batch_supported is False:
             return await self._sequential_fallback(requests)
 
+        self._record_calls(len(requests))
         await self._throttle()
         payload = [
             {"jsonrpc": "2.0", "id": i, "method": method, "params": params}
@@ -186,6 +210,22 @@ class HeliusClient:
             except (TypeError, KeyError):
                 continue
         return owners
+
+    async def get_transactions_batch(
+        self, signatures: list[str]
+    ) -> list[Optional[dict]]:
+        """getTransaction для нескольких сигнатур одним batch-запросом."""
+        if not signatures:
+            return []
+        params_template = {
+            "encoding": "jsonParsed",
+            "commitment": "confirmed",
+            "maxSupportedTransactionVersion": 0,
+        }
+        requests = [
+            ("getTransaction", [sig, params_template]) for sig in signatures
+        ]
+        return await self.batch_request(requests)
 
     # ----- DAS-методы -----
 

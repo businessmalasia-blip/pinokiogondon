@@ -10,40 +10,43 @@ def _human_score(human_percent: float) -> int:
         return 10
     if human_percent >= 60:
         return 7
-    if human_percent >= 45:
-        return 4
+    if human_percent >= 50:
+        return 5
+    if human_percent >= 40:
+        return 3
     return 0
 
 
 def _msr_score(msr: Optional[float]) -> int:
-    # <50 или Unknown (msr отсутствует) -> 0
     if msr is None:
         return 0
-    if msr >= 85:
+    if msr >= 90:
         return 10
-    if msr >= 70:
+    if msr >= 80:
         return 7
-    if msr >= 50:
-        return 4
+    if msr >= 70:
+        return 5
     return 0
 
 
 def _concentration_score(top10_percent: float) -> int:
-    # Брекеты по ТЗ: топ-10 10–25% даёт 7 баллов (фильтр пропускает до 25%,
-    # иначе токены 15–25% проходят фильтр и умирают на скоре с нулём).
-    if top10_percent < 10:
+    if top10_percent <= 8:
         return 10
-    if top10_percent <= 25:
+    if top10_percent <= 12:
         return 7
+    if top10_percent <= 15:
+        return 5
     return 0
 
 
 def _bundle_score(bundle_percent: float) -> int:
     if bundle_percent <= 10:
         return 10
-    if bundle_percent <= 25:
+    if bundle_percent <= 15:
         return 7
-    return 3
+    if bundle_percent <= 20:
+        return 5
+    return 0
 
 
 def calculate_score(token_data: dict, settings: Settings) -> dict:

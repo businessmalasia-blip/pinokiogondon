@@ -223,6 +223,22 @@ async def analyze_token(
         await ctx.redis.set(f"seen:{mint}", "1", ex=s.analysis_retry_ttl)
         return
 
+    # --- Предварительная проверка 2.3: плотность покупок за последние 2 мин ---
+    now_ts = time.time()
+    recent_tx_count = sum(
+        1 for sig in mint_signatures
+        if not sig.get("err") and sig.get("blockTime")
+        and (now_ts - sig["blockTime"]) <= 120
+    )
+    if recent_tx_count < s.min_buy_count_last_2min:
+        log.info(
+            "[%s] ❌ ОТСЕЯН: %d tx за последние 2 мин < %d (MIN_BUY_COUNT_LAST_2MIN)",
+            mint, recent_tx_count, s.min_buy_count_last_2min,
+        )
+        await ctx.stats.record_filter_result(mint, "inactive")
+        await ctx.redis.set(f"seen:{mint}", "1", ex=s.analysis_retry_ttl)
+        return
+
     # Фильтр 1: концентрация
     conc_status, holders, top10_percent = await check_concentration(
         mint, ctx.helius, s, bonding_curve, raw_supply
@@ -255,6 +271,15 @@ async def analyze_token(
     # Бандлы: доля покупок в слоте создания токена (снайперы на запуске)
     bundle_percent = calculate_bundle_percent(mint_signatures, s.bundle_slot_window)
     log.info("[%s] 📦 бандлы на запуске: %.1f%%", mint, bundle_percent)
+
+    # Жёсткий порог по бандлам: >MAX_BUNDLE_PERCENT → мгновенный отсев до скоринга
+    if bundle_percent > s.max_bundle_percent:
+        log.info(
+            "[%s] ❌ ОТСЕЯН: бандлы %.1f%% > %.0f%% (MAX_BUNDLE_PERCENT)",
+            mint, bundle_percent, s.max_bundle_percent,
+        )
+        await ctx.stats.record_filter_result(mint, "score")
+        return
 
     # История дева
     dev = await check_dev(
