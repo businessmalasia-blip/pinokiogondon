@@ -88,6 +88,9 @@ class Settings:
     dev_tokens_check_max: int
     survivor_min_volume_usd: float
 
+    # WebSocket
+    laserstream_enabled: bool
+
     # Прочее
     seen_mint_ttl: int
     max_concurrent_analyses: int
@@ -168,6 +171,7 @@ def load_settings() -> Settings:
         das_min_accounts=int(os.getenv("DAS_MIN_ACCOUNTS", "15")),
         das_retry_delay=float(os.getenv("DAS_RETRY_DELAY", "12")),
         das_retries=int(os.getenv("DAS_RETRIES", "2")),
+        laserstream_enabled=os.getenv("LASERSTREAM_ENABLED", "false").lower() == "true",
         analysis_retry_ttl=int(os.getenv("ANALYSIS_RETRY_TTL", "180")),
         alert_dedup_ttl=int(os.getenv("ALERT_DEDUP_TTL", "86400")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
