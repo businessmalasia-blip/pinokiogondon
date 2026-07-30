@@ -586,7 +586,7 @@ async def pump_logs_loop(ctx: Context) -> None:
         try:
             log.info("WebSocket: попытка подключения #%d...", attempt)
             async with websockets.connect(
-                s.rpc_ws_url,
+                s.ws_rpc_url,
                 ping_interval=20,
                 ping_timeout=20,
                 open_timeout=15,

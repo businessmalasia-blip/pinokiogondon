@@ -88,8 +88,8 @@ class Settings:
     dev_tokens_check_max: int
     survivor_min_volume_usd: float
 
-    # WebSocket
-    laserstream_enabled: bool
+    # WebSocket (отдельный URL — не Helius, чтобы не тратить streaming-кредиты)
+    ws_rpc_url: str
 
     # Прочее
     seen_mint_ttl: int
@@ -106,9 +106,6 @@ class Settings:
     def rpc_http_url(self) -> str:
         return f"https://mainnet.helius-rpc.com/?api-key={self.helius_api_key}"
 
-    @property
-    def rpc_ws_url(self) -> str:
-        return f"wss://mainnet.helius-rpc.com/?api-key={self.helius_api_key}"
 
 
 def load_settings() -> Settings:
@@ -171,7 +168,10 @@ def load_settings() -> Settings:
         das_min_accounts=int(os.getenv("DAS_MIN_ACCOUNTS", "15")),
         das_retry_delay=float(os.getenv("DAS_RETRY_DELAY", "12")),
         das_retries=int(os.getenv("DAS_RETRIES", "2")),
-        laserstream_enabled=os.getenv("LASERSTREAM_ENABLED", "false").lower() == "true",
+        ws_rpc_url=os.getenv(
+            "WS_RPC_URL",
+            "wss://api.mainnet-beta.solana.com",
+        ),
         analysis_retry_ttl=int(os.getenv("ANALYSIS_RETRY_TTL", "180")),
         alert_dedup_ttl=int(os.getenv("ALERT_DEDUP_TTL", "86400")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
