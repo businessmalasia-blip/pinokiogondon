@@ -155,7 +155,11 @@ async def cmd_settings(message: Message, ctx) -> None:
         f"Мин. скор: {s.min_score} (MIN_SCORE) — веса H {s.score_weight_human:.2f} / "
         f"MSR {s.score_weight_msr:.2f} / C {s.score_weight_concentration:.2f} / "
         f"B {s.score_weight_bundle:.2f}\n"
-        f"Выживший токен: объём > ${s.survivor_min_volume_usd:,.0f}"
+        f"Выживший токен: объём > ${s.survivor_min_volume_usd:,.0f}\n"
+        f"Стабильность: рост ≤ {s.max_price_increase_percent:.0f}% за {s.stability_check_seconds:.0f}с "
+        f"(MAX_PRICE_INCREASE_PERCENT / STABILITY_CHECK_SECONDS)\n"
+        f"Торг. часы: {s.trading_start_hour:02d}:00–{s.trading_end_hour:02d}:00 {s.timezone} "
+        f"(TRADING_START_HOUR / TRADING_END_HOUR / TIMEZONE)"
     )
     await message.answer(text)
 

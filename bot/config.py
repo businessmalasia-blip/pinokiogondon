@@ -91,6 +91,15 @@ class Settings:
     # WebSocket (отдельный URL — не Helius, чтобы не тратить streaming-кредиты)
     ws_rpc_url: str
 
+    # Стабильный рост
+    max_price_increase_percent: float
+    stability_check_seconds: float
+
+    # Торговые часы
+    timezone: str
+    trading_start_hour: int
+    trading_end_hour: int
+
     # Прочее
     seen_mint_ttl: int
     max_concurrent_analyses: int
@@ -172,6 +181,11 @@ def load_settings() -> Settings:
             "WS_RPC_URL",
             "wss://api.mainnet-beta.solana.com",
         ),
+        max_price_increase_percent=float(os.getenv("MAX_PRICE_INCREASE_PERCENT", "30.0")),
+        stability_check_seconds=float(os.getenv("STABILITY_CHECK_SECONDS", "60.0")),
+        timezone=os.getenv("TIMEZONE", "Europe/Moscow"),
+        trading_start_hour=int(os.getenv("TRADING_START_HOUR", "8")),
+        trading_end_hour=int(os.getenv("TRADING_END_HOUR", "22")),
         analysis_retry_ttl=int(os.getenv("ANALYSIS_RETRY_TTL", "180")),
         alert_dedup_ttl=int(os.getenv("ALERT_DEDUP_TTL", "86400")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),

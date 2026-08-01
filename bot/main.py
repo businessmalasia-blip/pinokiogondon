@@ -9,8 +9,11 @@ import base64
 import json
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import aiohttp
 import websockets
@@ -64,6 +67,44 @@ async def market_cap(ctx: Context, bonding_curve: str) -> Optional[float]:
 
 
 # ---------------------------------------------------------------------------
+# Вспомогательные проверки перед алертом
+# ---------------------------------------------------------------------------
+
+def _is_in_trading_hours(s: Settings) -> bool:
+    """True, если текущее время в Москве (или указанной TZ) в пределах торговых часов."""
+    now = datetime.now(ZoneInfo(s.timezone))
+    return s.trading_start_hour <= now.hour < s.trading_end_hour
+
+
+async def _check_sell_pressure(ctx: Context, mint: str, bonding_curve: str) -> bool:
+    """True если обнаружен дамп (продажа > 1% суплая) в последних 10 транзакциях."""
+    from .pump import parse_trade_event, TOKEN_TOTAL_SUPPLY_RAW
+
+    threshold = TOKEN_TOTAL_SUPPLY_RAW // 100  # 1% суплая в raw-единицах
+    sigs = await ctx.helius.get_signatures(bonding_curve, limit=10)
+    if not sigs:
+        return False
+    sig_list = [sig["signature"] for sig in sigs if sig.get("signature")]
+    txs = await ctx.helius.get_transactions_batch(sig_list)
+    for tx in txs:
+        if not tx:
+            continue
+        logs = (tx.get("meta") or {}).get("logMessages") or []
+        for line in logs:
+            event = parse_trade_event(line)
+            if event and not event["is_buy"] and event["mint"] == mint:
+                if event["token_amount"] > threshold:
+                    log.info(
+                        "[%s] SELL_PRESSURE: detected dump from large holder "
+                        "(%.1f%% supply sold)",
+                        mint,
+                        event["token_amount"] / TOKEN_TOTAL_SUPPLY_RAW * 100,
+                    )
+                    return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Ожидание входа капы в целевой диапазон
 # ---------------------------------------------------------------------------
 
@@ -86,10 +127,12 @@ async def wait_for_mc_range(
     # равно бросается через 5 минут, а не висит весь таймаут.
     dumped_since: Optional[float] = None
     last_fresh_at = time.monotonic()
+    mc_history: deque = deque()  # (monotonic_time, mc) для проверки стабильности
     while time.monotonic() < deadline:
         mc = await market_cap(ctx, bonding_curve)
         if mc is not None:
             last_fresh_at = time.monotonic()
+            mc_history.append((time.monotonic(), mc))
         elif time.monotonic() - last_fresh_at > s.mc_stale_timeout:
             # getAccountInfo завис/не отдаёт баланс дольше порога — не рискуем
             # отправлять алерт по устаревшей капе
@@ -99,6 +142,27 @@ async def wait_for_mc_range(
             )
             return None
         if mc is not None and s.alert_mc_min <= mc <= s.alert_mc_max:
+            # Проверка торговых часов (московское время)
+            if not _is_in_trading_hours(s):
+                log.info(
+                    "[%s] TRADING_HOURS: outside window (%d–%d %s) — ожидаю",
+                    mint, s.trading_start_hour, s.trading_end_hour, s.timezone,
+                )
+                await asyncio.sleep(s.mc_poll_interval)
+                continue
+            # Проверка стабильности: капа не должна вырасти > MAX_PRICE_INCREASE_PERCENT
+            # за последние STABILITY_CHECK_SECONDS секунд
+            cutoff = time.monotonic() - s.stability_check_seconds
+            old_mc = next((m for t, m in mc_history if t >= cutoff), None)
+            if old_mc is not None and old_mc > 0:
+                increase_pct = (mc - old_mc) / old_mc * 100
+                if increase_pct > s.max_price_increase_percent:
+                    log.info(
+                        "[%s] ANTI_VOLATILITY: price increased %.1f%% in %.0fs — ожидаю",
+                        mint, increase_pct, s.stability_check_seconds,
+                    )
+                    await asyncio.sleep(s.mc_poll_interval)
+                    continue
             log.info("[%s] 🎯 капа вошла в диапазон: $%.0f", mint, mc)
             return mc
         if mc is not None and s.mc_wait_abort_below > 0:
@@ -386,6 +450,11 @@ async def wait_and_alert(
         ):
             log.info("[%s] алерт отменён: капа %s вне guard-диапазона", mint, final_mc)
             ctx.stats.bump("guard_out")
+            await ctx.redis.set(f"seen:{mint}", "1", ex=s.analysis_retry_ttl)
+            return
+
+        # Проверка давления продаж: если крупный холдер дампит — отменяем алерт
+        if await _check_sell_pressure(ctx, mint, bonding_curve):
             await ctx.redis.set(f"seen:{mint}", "1", ex=s.analysis_retry_ttl)
             return
 
