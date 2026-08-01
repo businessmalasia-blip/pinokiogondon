@@ -68,8 +68,7 @@ async def cmd_status(message: Message, ctx) -> None:
         f"🔍 Транзакций проверено: {counters.get('tx_checked', 0):,}\n"
         f"📈 Расчётов капы: {counters.get('mc_calcs', 0):,}\n"
         f"🔔 Алертов отправлено: {counters.get('alerts_sent', 0):,}\n"
-        f"💳 Helius DAS-кредиты: ~{helius_k} тыс./сутки (только getAsset; "
-        f"остальные RPC — публичный нод, бесплатно)"
+        f"💳 Кредиты Helius: расход ~{helius_k} тыс./сутки (лимит 1M/мес)"
     )
     await message.answer(text)
 
