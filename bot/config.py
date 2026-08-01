@@ -88,6 +88,8 @@ class Settings:
     dev_tokens_check_max: int
     survivor_min_volume_usd: float
 
+    # Стандартные Solana RPC-вызовы (не DAS) — публичный нод, кредиты не тратятся
+    sol_rpc_url: str
     # WebSocket (отдельный URL — не Helius, чтобы не тратить streaming-кредиты)
     ws_rpc_url: str
 
@@ -177,6 +179,10 @@ def load_settings() -> Settings:
         das_min_accounts=int(os.getenv("DAS_MIN_ACCOUNTS", "15")),
         das_retry_delay=float(os.getenv("DAS_RETRY_DELAY", "12")),
         das_retries=int(os.getenv("DAS_RETRIES", "2")),
+        sol_rpc_url=os.getenv(
+            "SOL_RPC_URL",
+            "https://api.mainnet-beta.solana.com",
+        ),
         ws_rpc_url=os.getenv(
             "WS_RPC_URL",
             "wss://api.mainnet-beta.solana.com",
