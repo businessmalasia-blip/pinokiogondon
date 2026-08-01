@@ -163,8 +163,27 @@ async def wait_for_mc_range(
                     )
                     await asyncio.sleep(s.mc_poll_interval)
                     continue
-            log.info("[%s] 🎯 капа вошла в диапазон: $%.0f", mint, mc)
-            return mc
+            # Контрольный выстрел: немедленная повторная проверка капы без
+            # ожидания следующей итерации цикла — сокращает задержку алерта.
+            log.info("[%s] ⚡ контрольный выстрел (MC $%.0f в диапазоне)…", mint, mc)
+            confirm_mc = await market_cap(ctx, bonding_curve)
+            if confirm_mc is not None:
+                mc_history.append((time.monotonic(), confirm_mc))
+            if confirm_mc is None or not (
+                s.send_guard_mc_min <= confirm_mc <= s.send_guard_mc_max
+            ):
+                log.info(
+                    "[%s] ⚡ контрольный выстрел: MC %s вне guard-диапазона — продолжаю",
+                    mint,
+                    f"${confirm_mc:,.0f}" if confirm_mc is not None else "н/д",
+                )
+                await asyncio.sleep(s.mc_poll_interval)
+                continue
+            log.info(
+                "[%s] 🎯 капа подтверждена контрольным выстрелом: $%.0f",
+                mint, confirm_mc,
+            )
+            return confirm_mc
         if mc is not None and s.mc_wait_abort_below > 0:
             if mc < s.mc_wait_abort_below:
                 if dumped_since is None:
