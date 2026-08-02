@@ -73,44 +73,60 @@ async def cmd_status(message: Message, ctx) -> None:
     await message.answer(text)
 
 
+FILTER_LABELS = {
+    "age":         ("⏳", "Возраст"),
+    "inactive":    ("💤", "Активность"),
+    "concentration": ("🏦", "Концентрация"),
+    "dev":         ("👨‍💻", "Дев / Early buy"),
+    "human_strict":("👥", "HUMAN strict"),
+    "score":       ("🎯", "Score / Vol / Buyers"),
+    "passed":      ("✅", "Прошло все фильтры"),
+}
+
+
 @router.message(Command("stats"))
 async def cmd_stats(message: Message, ctx) -> None:
     if not _allowed(message, ctx):
         return
     counters = await ctx.stats.counters()
+    alerts   = counters.get("alerts_sent", 0)
+    no_win   = counters.get("no_window", 0)
+    guard    = counters.get("guard_out", 0)
+
     lines = [
         "📊 <b>Статистика скринера</b>",
-        f"Всего алертов: {counters.get('alerts_sent', 0):,}",
-        f"Прошли фильтры, но капа не вошла в окно: {counters.get('no_window', 0):,}",
-        f"Отменено guard-проверкой при отправке: {counters.get('guard_out', 0):,}",
+        "",
+        f"🔔 Алертов отправлено: <b>{alerts:,}</b>",
+        f"⌛ Не вошли в окно капы: {no_win:,}  ·  🚫 Отменено guard: {guard:,}",
     ]
 
     for window in ("1h", "6h"):
-        data = await ctx.redis.hgetall(f"outcome:{window}")
+        data    = await ctx.redis.hgetall(f"outcome:{window}")
         checked = int(data.get("checked", 0))
-        grad = int(data.get("grad", 0))
-        x13 = int(data.get("x13", 0))
-        x2 = int(data.get("x2", 0))
-        dead = int(data.get("dead", 0))
+        grad    = int(data.get("grad", 0))
+        x13     = int(data.get("x13", 0))
+        x2      = int(data.get("x2", 0))
+        dead    = int(data.get("dead", 0))
         lines += [
             "",
-            f"Через {window} (проверено {checked}):",
-            f"  🎓 Градуация: {grad} ({_pct(grad, checked)})",
-            f"  📈 ≥1.3x: {x13} ({_pct(x13, checked)})",
-            f"  🚀 ≥2x: {x2} ({_pct(x2, checked)})",
-            f"  💀 Умерло: {dead} ({_pct(dead, checked)})",
+            f"<b>📈 Исходы через {window}</b>  (проверено: {checked})",
+            f"  🎓 Graduated  — {grad} ({_pct(grad, checked)})",
+            f"  📊 Рост ≥1.3x — {x13} ({_pct(x13, checked)})",
+            f"  🚀 Рост ≥2x   — {x2} ({_pct(x2, checked)})",
+            f"  💀 Умерло     — {dead} ({_pct(dead, checked)})",
         ]
 
-    lines += ["", "🔬 <b>Работа фильтров</b> (градуации за 24ч среди отсеянных):"]
+    lines += ["", "<b>🔬 Воронка фильтров</b>  (grad = градуировало за 24ч)"]
     for filter_name, verb in FILTER_ROWS:
-        total = counters.get(f"filtered:{filter_name}", 0)
+        total     = counters.get(f"filtered:{filter_name}", 0)
         grad_data = await ctx.redis.hgetall(f"gradstats:{filter_name}")
-        checked = int(grad_data.get("checked", 0))
+        checked   = int(grad_data.get("checked", 0))
         graduated = int(grad_data.get("graduated", 0))
-        lines.append(
-            f"  {filter_name}: {verb} {total:,}, "
-            f"градуировало {graduated}/{checked} ({_pct(graduated, checked)})"
-        )
+        icon, label = FILTER_LABELS.get(filter_name, ("·", filter_name))
+        grad_str = _pct(graduated, checked) if checked else "—"
+        action   = "прошло" if filter_name == "passed" else "отсеяно"
+        lines.append(f"  {icon} {label}  —  {action} {total:,}  ·  grad {grad_str}")
+
     await message.answer("\n".join(lines))
 
 
@@ -137,35 +153,42 @@ async def cmd_settings(message: Message, ctx) -> None:
     if not _allowed(message, ctx):
         return
     s = ctx.settings
-    text = (
-        "⚙️ <b>Текущие пороги</b>\n"
-        f"Возраст: ≤ {s.max_token_age_hours:.0f}ч | Активность: ≤ {s.max_inactive_seconds:.0f}с\n"
-        f"Покупок за 2 мин: ≥ {s.min_buy_count_last_2min} (MIN_BUY_COUNT_LAST_2MIN)\n"
-        f"Капа для анализа: ≥ ${s.mc_analyze_min:,.0f}\n"
-        f"Диапазон алерта: ${s.alert_mc_min:,.0f}–${s.alert_mc_max:,.0f} "
-        f"(MIN_CAP_ALERT / MAX_CAP_ALERT)\n"
-        f"Guard при отправке: ${s.send_guard_mc_min:,.0f}–${s.send_guard_mc_max:,.0f} "
-        f"(GUARD_MIN_CAP / GUARD_MAX_CAP)\n"
-        f"Холдер: ≤ {s.holder_max_percent}% (MAX_SINGLE_HOLDER_PERCENT) | "
-        f"Топ-10: ≤ {s.top10_max_percent}% (MAX_TOP10_HOLDERS_PERCENT)\n"
-        f"HUMAN: ≥ {s.human_min_percent:.0f}% | UNKNOWN: ≤ {s.unknown_max_percent:.0f}%\n"
-        f"MSR: ≥ {s.msr_min_percent:.0f}% (мин. {s.dev_min_tokens} токенов, "
-        f"{s.dev_history_days} дн.)\n"
-        f"Бандлы: жёсткий порог ≤ {s.max_bundle_percent:.0f}% (MAX_BUNDLE_PERCENT)\n"
-        f"Мин. скор: {s.min_score} (MIN_SCORE) — веса H {s.score_weight_human:.2f} / "
-        f"MSR {s.score_weight_msr:.2f} / C {s.score_weight_concentration:.2f} / "
-        f"B {s.score_weight_bundle:.2f}\n"
-        f"Выживший токен: объём > ${s.survivor_min_volume_usd:,.0f}\n"
-        f"Стабильность: рост ≤ {s.max_price_increase_percent:.0f}% за {s.stability_check_seconds:.0f}с "
-        f"(MAX_PRICE_INCREASE_PERCENT / STABILITY_CHECK_SECONDS)\n"
-        f"Торг. часы: {s.trading_start_hour:02d}:00–{s.trading_end_hour:02d}:00 {s.timezone} "
-        f"(TRADING_START_HOUR / TRADING_END_HOUR / TIMEZONE)\n"
-        f"Тренд: рост ≥ {s.min_trend_percent:.1f}% за {s.stability_check_seconds:.0f}с (MIN_TREND_PERCENT)\n"
-        f"Объём 5 мин: ≥ ${s.min_volume_usd_5min:,.0f} (MIN_VOLUME_USD_5MIN)\n"
-        f"Покупателей 5 мин: ≥ {s.min_unique_buyers_5min} (MIN_UNIQUE_BUYERS_5MIN)\n"
-        f"Ранняя покупка дева: {'вкл' if s.dev_early_buy_required else 'откл'} (DEV_EARLY_BUY_REQUIRED)"
-    )
-    await message.answer(text)
+    early_buy = "✅ вкл" if s.dev_early_buy_required else "❌ откл"
+    lines = [
+        "⚙️ <b>Настройки скринера</b>",
+        "",
+        "🕐 <b>Торговые часы</b>",
+        f"  {s.trading_start_hour:02d}:00 – {s.trading_end_hour:02d}:00  ({s.timezone})",
+        "",
+        "💰 <b>Market Cap</b>",
+        f"  Порог анализа:    ≥ ${s.mc_analyze_min:,.0f}",
+        f"  Диапазон алерта:  ${s.alert_mc_min:,.0f} – ${s.alert_mc_max:,.0f}",
+        f"  Guard при отправке: ${s.send_guard_mc_min:,.0f} – ${s.send_guard_mc_max:,.0f}",
+        "",
+        "🔎 <b>Предфильтры</b>",
+        f"  Возраст:           ≤ {s.max_token_age_hours:.0f}ч",
+        f"  Последняя сделка:  ≤ {s.max_inactive_seconds:.0f}с назад",
+        f"  Покупок / 2 мин:   ≥ {s.min_buy_count_last_2min}",
+        f"  Объём / 5 мин:     ≥ ${s.min_volume_usd_5min:,.0f}",
+        f"  Покупателей / 5 мин: ≥ {s.min_unique_buyers_5min}",
+        "",
+        "🎯 <b>Качество токена</b>",
+        f"  Макс. холдер:  ≤ {s.holder_max_percent}%  ·  Топ-10: ≤ {s.top10_max_percent}%",
+        f"  HUMAN:         ≥ {s.human_min_percent:.0f}%  ·  UNKNOWN: ≤ {s.unknown_max_percent:.0f}%",
+        f"  Бандлы:        ≤ {s.max_bundle_percent:.0f}%",
+        f"  MSR:           ≥ {s.msr_min_percent:.0f}%  (мин. {s.dev_min_tokens} токена, {s.dev_history_days} дн.)",
+        f"  Ранняя покупка дева: {early_buy}",
+        "",
+        "🧮 <b>Скоринг</b>",
+        f"  Мин. балл: {s.min_score} / 10",
+        f"  Веса: HUMAN {s.score_weight_human:.2f} · MSR {s.score_weight_msr:.2f}"
+        f" · Conc {s.score_weight_concentration:.2f} · Bundle {s.score_weight_bundle:.2f}",
+        "",
+        "🛡 <b>Защита</b>",
+        f"  Тренд роста:   ≥ {s.min_trend_percent:.1f}% за {s.stability_check_seconds:.0f}с",
+        f"  Антиволат.:    рост ≤ {s.max_price_increase_percent:.0f}% за {s.stability_check_seconds:.0f}с",
+    ]
+    await message.answer("\n".join(lines))
 
 
 @router.message(Command("help", "start"))
