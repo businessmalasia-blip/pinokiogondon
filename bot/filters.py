@@ -242,6 +242,13 @@ async def _find_creator(
     return fee_payer(tx)
 
 
+async def get_creator(
+    mint: str, helius: HeliusClient, signatures: list[dict]
+) -> Optional[str]:
+    """Публичная обёртка: создатель токена по уже загруженным сигнатурам минта."""
+    return await _find_creator(mint, helius, signatures)
+
+
 async def _token_survived(
     session: aiohttp.ClientSession, mint: str, min_volume_usd: float
 ) -> bool:

@@ -10,7 +10,7 @@ import json
 import logging
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -31,6 +31,7 @@ from .filters import (
     calculate_human_percent,
     check_concentration,
     check_dev,
+    get_creator,
 )
 from .scoring import calculate_score
 from .helius import HeliusClient
@@ -59,6 +60,8 @@ class Context:
     stats: Stats
     candidate_queue: asyncio.Queue
     sol_price: Optional[float] = None
+    # {mint: [(wall_time, usd_amount), ...]} — накапливается из WebSocket-событий
+    vol_tracker: dict = field(default_factory=dict)
 
 
 async def market_cap(ctx: Context, bonding_curve: str) -> Optional[float]:
@@ -101,6 +104,80 @@ async def _check_sell_pressure(ctx: Context, mint: str, bonding_curve: str) -> b
                         event["token_amount"] / TOKEN_TOTAL_SUPPLY_RAW * 100,
                     )
                     return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Новые фильтры: Volume, Unique Buyers, Dev Early Buy
+# ---------------------------------------------------------------------------
+
+def _check_volume(ctx: "Context", mint: str) -> tuple[bool, float]:
+    """Проверка USD-объёма покупок за последние 5 мин из WebSocket-событий."""
+    cutoff = time.time() - 300
+    bucket = ctx.vol_tracker.get(mint) or []
+    fresh = [(t, v) for t, v in bucket if t >= cutoff]
+    ctx.vol_tracker[mint] = fresh
+    total = sum(v for _, v in fresh)
+    return total >= ctx.settings.min_volume_usd_5min, total
+
+
+async def _check_unique_buyers(
+    ctx: "Context", mint: str, mint_signatures: list[dict]
+) -> tuple[bool, int]:
+    """Кол-во уникальных feePayer-адресов среди транзакций минта за последние 5 мин."""
+    from .pump import fee_payer as _fee_payer
+
+    cutoff = time.time() - 300
+    recent_sigs = [
+        sig["signature"]
+        for sig in mint_signatures
+        if not sig.get("err")
+        and sig.get("blockTime", 0) >= cutoff
+        and sig.get("signature")
+    ]
+    if not recent_sigs:
+        return False, 0
+    txs = await ctx.helius.get_transactions_batch(recent_sigs[:25])
+    unique: set[str] = set()
+    for tx in txs:
+        if not tx:
+            continue
+        fp = _fee_payer(tx)
+        if fp:
+            unique.add(fp)
+    return len(unique) >= ctx.settings.min_unique_buyers_5min, len(unique)
+
+
+async def _check_dev_early_buy(
+    ctx: "Context", mint: str, creator: str, mint_signatures: list[dict]
+) -> bool:
+    """True если дев купил токен в первые 60 сек после создания."""
+    from .pump import parse_trade_event
+
+    oldest_time = next(
+        (float(sig["blockTime"]) for sig in reversed(mint_signatures) if sig.get("blockTime")),
+        None,
+    )
+    if oldest_time is None:
+        return False
+    early_cutoff = oldest_time + 60
+    creator_sigs = await ctx.helius.get_signatures(creator, limit=5)
+    early_sigs = [
+        sig["signature"]
+        for sig in creator_sigs
+        if sig.get("blockTime") and sig["blockTime"] <= early_cutoff
+        and not sig.get("err") and sig.get("signature")
+    ]
+    if not early_sigs:
+        return False
+    txs = await ctx.helius.get_transactions_batch(early_sigs)
+    for tx in txs:
+        if not tx:
+            continue
+        for line in (tx.get("meta") or {}).get("logMessages") or []:
+            event = parse_trade_event(line)
+            if event and event["is_buy"] and event["mint"] == mint:
+                return True
     return False
 
 
@@ -183,6 +260,19 @@ async def wait_for_mc_range(
                 "[%s] 🎯 капа подтверждена контрольным выстрелом: $%.0f",
                 mint, confirm_mc,
             )
+            # Фильтр TREND DIRECTION: рост капы ≥ MIN_TREND_PERCENT за STABILITY_CHECK_SECONDS
+            if s.min_trend_percent > 0:
+                trend_cutoff = time.monotonic() - s.stability_check_seconds
+                oldest_mc = next((m for t, m in mc_history if t >= trend_cutoff), None)
+                if oldest_mc is not None and oldest_mc > 0:
+                    growth_pct = (confirm_mc - oldest_mc) / oldest_mc * 100
+                    if growth_pct < s.min_trend_percent:
+                        log.info(
+                            "[%s] TREND: рост %.1f%% за %.0fс < MIN_TREND_PERCENT %.1f%% — жду",
+                            mint, growth_pct, s.stability_check_seconds, s.min_trend_percent,
+                        )
+                        await asyncio.sleep(s.mc_poll_interval)
+                        continue
             return confirm_mc
         if mc is not None and s.mc_wait_abort_below > 0:
             if mc < s.mc_wait_abort_below:
@@ -322,6 +412,30 @@ async def analyze_token(
         await ctx.redis.set(f"seen:{mint}", "1", ex=s.analysis_retry_ttl)
         return
 
+    # --- Предварительная проверка 2.4: USD-объём покупок за 5 мин ---
+    vol_ok, vol_usd = _check_volume(ctx, mint)
+    if not vol_ok:
+        log.info(
+            "[%s] ❌ ОТСЕЯН VOLUME: $%.0f за 5 мин < $%.0f (MIN_VOLUME_USD_5MIN)",
+            mint, vol_usd, s.min_volume_usd_5min,
+        )
+        await ctx.stats.record_filter_result(mint, "score")
+        await ctx.redis.set(f"seen:{mint}", "1", ex=s.analysis_retry_ttl)
+        return
+    log.info("[%s] ✔ volume OK: $%.0f за 5 мин", mint, vol_usd)
+
+    # --- Предварительная проверка 2.5: уникальных покупателей за 5 мин ---
+    buyers_ok, unique_buyers = await _check_unique_buyers(ctx, mint, mint_signatures)
+    if not buyers_ok:
+        log.info(
+            "[%s] ❌ ОТСЕЯН UNIQUE_BUYERS: %d покупателей за 5 мин < %d (MIN_UNIQUE_BUYERS_5MIN)",
+            mint, unique_buyers, s.min_unique_buyers_5min,
+        )
+        await ctx.stats.record_filter_result(mint, "score")
+        await ctx.redis.set(f"seen:{mint}", "1", ex=s.analysis_retry_ttl)
+        return
+    log.info("[%s] ✔ unique buyers OK: %d за 5 мин", mint, unique_buyers)
+
     # Фильтр 1: концентрация
     conc_status, holders, top10_percent = await check_concentration(
         mint, ctx.helius, s, bonding_curve, raw_supply
@@ -376,6 +490,20 @@ async def analyze_token(
         await ctx.stats.record_filter_result(mint, "dev")
         await ctx.redis.set(f"seen:{mint}", "1", ex=s.seen_mint_ttl)
         return
+
+    # --- Фильтр DEV_EARLY_BUY: дев купил в первые 60 сек ---
+    if s.dev_early_buy_required:
+        creator = await get_creator(mint, ctx.helius, mint_signatures)
+        if creator:
+            if not await _check_dev_early_buy(ctx, mint, creator, mint_signatures):
+                log.info(
+                    "[%s] ❌ ОТСЕЯН DEV_EARLY_BUY: дев %s не купил в первые 60 сек",
+                    mint, creator,
+                )
+                await ctx.stats.record_filter_result(mint, "dev")
+                await ctx.redis.set(f"seen:{mint}", "1", ex=s.analysis_retry_ttl)
+                return
+            log.info("[%s] ✔ dev early buy подтверждён (%s)", mint, creator)
 
     # Unknown-дев (нет истории) — ужесточаем требования к HUMAN/UNKNOWN.
     # unknown_percent = 100 - human_percent (третьего состояния нет)
@@ -543,9 +671,13 @@ def screen_buy_events(ctx: Context, logs: list[str]) -> list[tuple[str, float]]:
         return []
     candidates = []
     seen_in_tx: set[str] = set()
+    now_wall = time.time()
     for event in iter_trade_events(logs):
         if not event["is_buy"]:
             continue
+        # Накапливаем USD-объём покупок для фильтра VOLUME (все покупки, до дедупа)
+        usd = event["sol_amount"] / 1e9 * sol_price
+        ctx.vol_tracker.setdefault(event["mint"], []).append((now_wall, usd))
         if not seen_in_tx:
             ctx.stats.bump("buys_seen")
         if event["mint"] in seen_in_tx:

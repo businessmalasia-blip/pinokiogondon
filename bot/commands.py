@@ -159,7 +159,11 @@ async def cmd_settings(message: Message, ctx) -> None:
         f"Стабильность: рост ≤ {s.max_price_increase_percent:.0f}% за {s.stability_check_seconds:.0f}с "
         f"(MAX_PRICE_INCREASE_PERCENT / STABILITY_CHECK_SECONDS)\n"
         f"Торг. часы: {s.trading_start_hour:02d}:00–{s.trading_end_hour:02d}:00 {s.timezone} "
-        f"(TRADING_START_HOUR / TRADING_END_HOUR / TIMEZONE)"
+        f"(TRADING_START_HOUR / TRADING_END_HOUR / TIMEZONE)\n"
+        f"Тренд: рост ≥ {s.min_trend_percent:.1f}% за {s.stability_check_seconds:.0f}с (MIN_TREND_PERCENT)\n"
+        f"Объём 5 мин: ≥ ${s.min_volume_usd_5min:,.0f} (MIN_VOLUME_USD_5MIN)\n"
+        f"Покупателей 5 мин: ≥ {s.min_unique_buyers_5min} (MIN_UNIQUE_BUYERS_5MIN)\n"
+        f"Ранняя покупка дева: {'вкл' if s.dev_early_buy_required else 'откл'} (DEV_EARLY_BUY_REQUIRED)"
     )
     await message.answer(text)
 

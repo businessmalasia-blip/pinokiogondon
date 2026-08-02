@@ -100,6 +100,15 @@ class Settings:
     trading_start_hour: int
     trading_end_hour: int
 
+    # Фильтр: тренд (рост капы)
+    min_trend_percent: float
+    # Фильтр: USD-объём покупок за 5 мин (из WebSocket-событий)
+    min_volume_usd_5min: float
+    # Фильтр: уникальных покупателей за 5 мин
+    min_unique_buyers_5min: int
+    # Фильтр: дев купил токен в первые 60 сек
+    dev_early_buy_required: bool
+
     # Прочее
     seen_mint_ttl: int
     max_concurrent_analyses: int
@@ -186,6 +195,11 @@ def load_settings() -> Settings:
         timezone=os.getenv("TIMEZONE", "Europe/Moscow"),
         trading_start_hour=int(os.getenv("TRADING_START_HOUR", "8")),
         trading_end_hour=int(os.getenv("TRADING_END_HOUR", "22")),
+        min_trend_percent=float(os.getenv("MIN_TREND_PERCENT", "3.0")),
+        min_volume_usd_5min=float(os.getenv("MIN_VOLUME_USD_5MIN", "500.0")),
+        min_unique_buyers_5min=int(os.getenv("MIN_UNIQUE_BUYERS_5MIN", "5")),
+        dev_early_buy_required=os.getenv("DEV_EARLY_BUY_REQUIRED", "true").lower()
+        in ("1", "true", "yes"),
         analysis_retry_ttl=int(os.getenv("ANALYSIS_RETRY_TTL", "180")),
         alert_dedup_ttl=int(os.getenv("ALERT_DEDUP_TTL", "86400")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
