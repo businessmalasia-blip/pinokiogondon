@@ -177,6 +177,7 @@ async def cmd_settings(message: Message, ctx) -> None:
         f"  HUMAN:         ≥ {s.human_min_percent:.0f}%  ·  UNKNOWN: ≤ {s.unknown_max_percent:.0f}%",
         f"  Бандлы:        ≤ {s.max_bundle_percent:.0f}%",
         f"  MSR:           ≥ {s.msr_min_percent:.0f}%  (мин. {s.dev_min_tokens} токена, {s.dev_history_days} дн.)",
+        f"  Выжившие токены: объём > ${s.survivor_min_volume_usd:,.0f}",
         f"  Ранняя покупка дева: {early_buy}",
         "",
         "🧮 <b>Скоринг</b>",
@@ -186,7 +187,8 @@ async def cmd_settings(message: Message, ctx) -> None:
         "",
         "🛡 <b>Защита</b>",
         f"  Тренд роста:   ≥ {s.min_trend_percent:.1f}% за {s.stability_check_seconds:.0f}с",
-        f"  Антиволат.:    рост ≤ {s.max_price_increase_percent:.0f}% за {s.stability_check_seconds:.0f}с",
+        f"  Антиволат. A:  рост ≤ {s.max_price_increase_percent:.0f}% за {s.stability_check_seconds:.0f}с",
+        f"  Антиволат. B:  разворот ≥ {s.sharp_reversal_drop_percent:.0f}% от пика за {s.stability_check_seconds:.0f}с",
     ]
     await message.answer("\n".join(lines))
 
