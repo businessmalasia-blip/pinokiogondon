@@ -73,10 +73,14 @@ async def market_cap(ctx: Context, bonding_curve: str) -> Optional[float]:
 # Вспомогательные проверки перед алертом
 # ---------------------------------------------------------------------------
 
-def _is_in_trading_hours(s: Settings) -> bool:
-    """True, если текущее время в Москве (или указанной TZ) в пределах торговых часов."""
-    now = datetime.now(ZoneInfo(s.timezone))
-    return s.trading_start_hour <= now.hour < s.trading_end_hour
+def _trading_session(s: Settings) -> Optional[str]:
+    """Возвращает 'EU', 'US' или None если вне торговых сессий."""
+    hour = datetime.now(ZoneInfo(s.timezone)).hour
+    if s.eu_session_start <= hour < s.eu_session_end:
+        return "EU"
+    if s.us_session_start <= hour < s.us_session_end:
+        return "US"
+    return None
 
 
 async def _check_sell_pressure(ctx: Context, mint: str, bonding_curve: str) -> bool:
@@ -219,14 +223,16 @@ async def wait_for_mc_range(
             )
             return None
         if mc is not None and s.alert_mc_min <= mc <= s.alert_mc_max:
-            # Проверка торговых часов (московское время)
-            if not _is_in_trading_hours(s):
+            # Проверка торговых сессий (EU / US)
+            _session = _trading_session(s)
+            if _session is None:
                 log.info(
-                    "[%s] TRADING_HOURS: outside window (%d–%d %s) — ожидаю",
-                    mint, s.trading_start_hour, s.trading_end_hour, s.timezone,
+                    "[%s] TRADING_HOURS: outside EU/US sessions — ожидаю",
+                    mint,
                 )
                 await asyncio.sleep(s.mc_poll_interval)
                 continue
+            log.info("[%s] TRADING_HOURS: %s session активна", mint, _session)
             # Anti-Volatility: два условия блокировки (любое из них → ждём)
             _now_mono = time.monotonic()
             _av_blocked = False

@@ -157,8 +157,9 @@ async def cmd_settings(message: Message, ctx) -> None:
     lines = [
         "⚙️ <b>Настройки скринера</b>",
         "",
-        "🕐 <b>Торговые часы</b>",
-        f"  {s.trading_start_hour:02d}:00 – {s.trading_end_hour:02d}:00  ({s.timezone})",
+        "🕐 <b>Торговые сессии</b>",
+        f"  🇪🇺 Европа:   {s.eu_session_start:02d}:00 – {s.eu_session_end:02d}:00  ({s.timezone})",
+        f"  🇺🇸 Америка:  {s.us_session_start:02d}:00 – {s.us_session_end:02d}:00  ({s.timezone})",
         "",
         "💰 <b>Market Cap</b>",
         f"  Порог анализа:    ≥ ${s.mc_analyze_min:,.0f}",

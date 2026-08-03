@@ -97,10 +97,12 @@ class Settings:
     # Мгновенный разворот: падение от пика на этот % за < STABILITY_CHECK_SECONDS сек
     sharp_reversal_drop_percent: float
 
-    # Торговые часы
+    # Торговые сессии
     timezone: str
-    trading_start_hour: int
-    trading_end_hour: int
+    eu_session_start: int
+    eu_session_end: int
+    us_session_start: int
+    us_session_end: int
 
     # Фильтр: тренд (рост капы)
     min_trend_percent: float
@@ -196,8 +198,10 @@ def load_settings() -> Settings:
         stability_check_seconds=float(os.getenv("STABILITY_CHECK_SECONDS", "60.0")),
         sharp_reversal_drop_percent=float(os.getenv("SHARP_REVERSAL_DROP_PERCENT", "10.0")),
         timezone=os.getenv("TIMEZONE", "Europe/Moscow"),
-        trading_start_hour=int(os.getenv("TRADING_START_HOUR", "8")),
-        trading_end_hour=int(os.getenv("TRADING_END_HOUR", "22")),
+        eu_session_start=int(os.getenv("EU_SESSION_START", "10")),
+        eu_session_end=int(os.getenv("EU_SESSION_END", "16")),
+        us_session_start=int(os.getenv("US_SESSION_START", "16")),
+        us_session_end=int(os.getenv("US_SESSION_END", "23")),
         min_trend_percent=float(os.getenv("MIN_TREND_PERCENT", "3.0")),
         min_volume_usd_5min=float(os.getenv("MIN_VOLUME_USD_5MIN", "500.0")),
         min_unique_buyers_5min=int(os.getenv("MIN_UNIQUE_BUYERS_5MIN", "5")),
