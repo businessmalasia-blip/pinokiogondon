@@ -227,9 +227,12 @@ async def wait_for_mc_range(
                 )
                 await asyncio.sleep(s.mc_poll_interval)
                 continue
-            # Проверка стабильности: капа не должна вырасти > MAX_PRICE_INCREASE_PERCENT
-            # за последние STABILITY_CHECK_SECONDS секунд
-            cutoff = time.monotonic() - s.stability_check_seconds
+            # Anti-Volatility: два условия блокировки (любое из них → ждём)
+            _now_mono = time.monotonic()
+            _av_blocked = False
+
+            # Условие A: слишком быстрый рост (манипулятивный памп)
+            cutoff = _now_mono - s.stability_check_seconds
             old_mc = next((m for t, m in mc_history if t >= cutoff), None)
             if old_mc is not None and old_mc > 0:
                 increase_pct = (mc - old_mc) / old_mc * 100
@@ -238,8 +241,28 @@ async def wait_for_mc_range(
                         "[%s] ANTI_VOLATILITY: price increased %.1f%% in %.0fs — ожидаю",
                         mint, increase_pct, s.stability_check_seconds,
                     )
-                    await asyncio.sleep(s.mc_poll_interval)
-                    continue
+                    _av_blocked = True
+
+            # Условие B: мгновенный разворот — пик в 120 сек и уже падаем
+            if not _av_blocked and s.sharp_reversal_drop_percent > 0:
+                _window_120 = [(t, m) for t, m in mc_history if _now_mono - t <= 120]
+                if _window_120:
+                    _peak_t, _peak_mc = max(_window_120, key=lambda x: x[1])
+                    if _peak_mc > 0:
+                        drop_pct = (_peak_mc - mc) / _peak_mc * 100
+                        time_since_peak = _now_mono - _peak_t
+                        if (drop_pct >= s.sharp_reversal_drop_percent
+                                and time_since_peak < s.stability_check_seconds):
+                            log.info(
+                                "[%s] ANTI_VOLATILITY: sharp reversal detected "
+                                "(peak: $%.0f, current: $%.0f, drop: %.1f%% in %.0fs) — ожидаю",
+                                mint, _peak_mc, mc, drop_pct, time_since_peak,
+                            )
+                            _av_blocked = True
+
+            if _av_blocked:
+                await asyncio.sleep(s.mc_poll_interval)
+                continue
             # Контрольный выстрел: немедленная повторная проверка капы без
             # ожидания следующей итерации цикла — сокращает задержку алерта.
             log.info("[%s] ⚡ контрольный выстрел (MC $%.0f в диапазоне)…", mint, mc)

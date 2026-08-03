@@ -91,9 +91,11 @@ class Settings:
     # WebSocket (отдельный URL — не Helius, чтобы не тратить streaming-кредиты)
     ws_rpc_url: str
 
-    # Стабильный рост
+    # Стабильный рост (Anti-Volatility)
     max_price_increase_percent: float
     stability_check_seconds: float
+    # Мгновенный разворот: падение от пика на этот % за < STABILITY_CHECK_SECONDS сек
+    sharp_reversal_drop_percent: float
 
     # Торговые часы
     timezone: str
@@ -192,6 +194,7 @@ def load_settings() -> Settings:
         ),
         max_price_increase_percent=float(os.getenv("MAX_PRICE_INCREASE_PERCENT", "30.0")),
         stability_check_seconds=float(os.getenv("STABILITY_CHECK_SECONDS", "60.0")),
+        sharp_reversal_drop_percent=float(os.getenv("SHARP_REVERSAL_DROP_PERCENT", "10.0")),
         timezone=os.getenv("TIMEZONE", "Europe/Moscow"),
         trading_start_hour=int(os.getenv("TRADING_START_HOUR", "8")),
         trading_end_hour=int(os.getenv("TRADING_END_HOUR", "22")),
