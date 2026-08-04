@@ -179,7 +179,7 @@ async def cmd_settings(message: Message, ctx) -> None:
         f"  Бандлы:        ≤ {s.max_bundle_percent:.0f}%",
         f"  MSR:           ≥ {s.msr_min_percent:.0f}%  (мин. {s.dev_min_tokens} токена, {s.dev_history_days} дн.)",
         f"  Выжившие токены: объём > ${s.survivor_min_volume_usd:,.0f}",
-        f"  Ранняя покупка дева: {early_buy}",
+        f"  Ранняя покупка дева: {early_buy}  (окно {s.dev_early_buy_window}с)",
         "",
         "🧮 <b>Скоринг</b>",
         f"  Мин. балл: {s.min_score} / 10",

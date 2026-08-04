@@ -110,8 +110,9 @@ class Settings:
     min_volume_usd_5min: float
     # Фильтр: уникальных покупателей за 5 мин
     min_unique_buyers_5min: int
-    # Фильтр: дев купил токен в первые 60 сек
+    # Фильтр: дев купил токен в первые N сек после создания
     dev_early_buy_required: bool
+    dev_early_buy_window: int
 
     # Прочее
     seen_mint_ttl: int
@@ -202,11 +203,12 @@ def load_settings() -> Settings:
         eu_session_end=int(os.getenv("EU_SESSION_END", "16")),
         us_session_start=int(os.getenv("US_SESSION_START", "16")),
         us_session_end=int(os.getenv("US_SESSION_END", "23")),
-        min_trend_percent=float(os.getenv("MIN_TREND_PERCENT", "3.0")),
-        min_volume_usd_5min=float(os.getenv("MIN_VOLUME_USD_5MIN", "500.0")),
-        min_unique_buyers_5min=int(os.getenv("MIN_UNIQUE_BUYERS_5MIN", "5")),
+        min_trend_percent=float(os.getenv("MIN_TREND_PERCENT", "2.0")),
+        min_volume_usd_5min=float(os.getenv("MIN_VOLUME_USD_5MIN", "400.0")),
+        min_unique_buyers_5min=int(os.getenv("MIN_UNIQUE_BUYERS_5MIN", "4")),
         dev_early_buy_required=os.getenv("DEV_EARLY_BUY_REQUIRED", "true").lower()
         in ("1", "true", "yes"),
+        dev_early_buy_window=int(os.getenv("DEV_EARLY_BUY_WINDOW", "120")),
         analysis_retry_ttl=int(os.getenv("ANALYSIS_RETRY_TTL", "180")),
         alert_dedup_ttl=int(os.getenv("ALERT_DEDUP_TTL", "86400")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),

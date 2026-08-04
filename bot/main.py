@@ -155,7 +155,7 @@ async def _check_unique_buyers(
 async def _check_dev_early_buy(
     ctx: "Context", mint: str, creator: str, mint_signatures: list[dict]
 ) -> bool:
-    """True если дев купил токен в первые 60 сек после создания."""
+    """True если дев купил токен в первые DEV_EARLY_BUY_WINDOW сек после создания."""
     from .pump import parse_trade_event
 
     oldest_time = next(
@@ -164,7 +164,7 @@ async def _check_dev_early_buy(
     )
     if oldest_time is None:
         return False
-    early_cutoff = oldest_time + 60
+    early_cutoff = oldest_time + ctx.settings.dev_early_buy_window
     creator_sigs = await ctx.helius.get_signatures(creator, limit=5)
     early_sigs = [
         sig["signature"]
