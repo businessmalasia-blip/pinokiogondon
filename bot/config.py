@@ -204,8 +204,8 @@ def load_settings() -> Settings:
         us_session_start=int(os.getenv("US_SESSION_START", "16")),
         us_session_end=int(os.getenv("US_SESSION_END", "23")),
         min_trend_percent=float(os.getenv("MIN_TREND_PERCENT", "2.0")),
-        min_volume_usd_5min=float(os.getenv("MIN_VOLUME_USD_5MIN", "400.0")),
-        min_unique_buyers_5min=int(os.getenv("MIN_UNIQUE_BUYERS_5MIN", "4")),
+        min_volume_usd_5min=float(os.getenv("MIN_VOLUME_USD_5MIN", "150.0")),
+        min_unique_buyers_5min=int(os.getenv("MIN_UNIQUE_BUYERS_5MIN", "2")),
         dev_early_buy_required=os.getenv("DEV_EARLY_BUY_REQUIRED", "true").lower()
         in ("1", "true", "yes"),
         dev_early_buy_window=int(os.getenv("DEV_EARLY_BUY_WINDOW", "120")),
