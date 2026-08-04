@@ -142,6 +142,10 @@ async def _check_unique_buyers(
     if not recent_sigs:
         return False, 0
     txs = await ctx.helius.get_transactions_batch(recent_sigs[:25])
+    # Если все ответы None — батч упал (429 / сеть). Пропускаем проверку.
+    if txs and not any(txs):
+        log.warning("[%s] ⏭ UNIQUE_BUYERS пропущен — Helius batch недоступен (rate limit?)", mint)
+        return True, 0
     unique: set[str] = set()
     for tx in txs:
         if not tx:
