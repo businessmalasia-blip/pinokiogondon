@@ -524,14 +524,14 @@ async def analyze_token(
         await ctx.redis.set(f"seen:{mint}", "1", ex=s.seen_mint_ttl)
         return
 
-    # --- Фильтр DEV_EARLY_BUY: дев купил в первые 60 сек ---
+    # --- Фильтр DEV_EARLY_BUY: дев купил в первые DEV_EARLY_BUY_WINDOW сек ---
     if s.dev_early_buy_required:
         creator = await get_creator(mint, ctx.helius, mint_signatures)
         if creator:
             if not await _check_dev_early_buy(ctx, mint, creator, mint_signatures):
                 log.info(
-                    "[%s] ❌ ОТСЕЯН DEV_EARLY_BUY: дев %s не купил в первые 60 сек",
-                    mint, creator,
+                    "[%s] ❌ ОТСЕЯН DEV_EARLY_BUY: дев %s не купил в первые %d сек",
+                    mint, creator, s.dev_early_buy_window,
                 )
                 await ctx.stats.record_filter_result(mint, "dev")
                 await ctx.redis.set(f"seen:{mint}", "1", ex=s.analysis_retry_ttl)
