@@ -106,6 +106,8 @@ class Settings:
 
     # Фильтр: тренд (рост капы)
     min_trend_percent: float
+    trend_wait_timeout: int
+    trend_recheck_interval: int
     # Фильтр: USD-объём покупок за 5 мин (из WebSocket-событий)
     min_volume_usd_5min: float
     # Фильтр: уникальных покупателей за 5 мин
@@ -203,7 +205,9 @@ def load_settings() -> Settings:
         eu_session_end=int(os.getenv("EU_SESSION_END", "16")),
         us_session_start=int(os.getenv("US_SESSION_START", "16")),
         us_session_end=int(os.getenv("US_SESSION_END", "23")),
-        min_trend_percent=float(os.getenv("MIN_TREND_PERCENT", "1.0")),
+        min_trend_percent=float(os.getenv("MIN_TREND_PERCENT", "0.5")),
+        trend_wait_timeout=int(os.getenv("TREND_WAIT_TIMEOUT", "300")),
+        trend_recheck_interval=int(os.getenv("TREND_RECHECK_INTERVAL", "60")),
         min_volume_usd_5min=float(os.getenv("MIN_VOLUME_USD_5MIN", "150.0")),
         min_unique_buyers_5min=int(os.getenv("MIN_UNIQUE_BUYERS_5MIN", "2")),
         dev_early_buy_required=os.getenv("DEV_EARLY_BUY_REQUIRED", "true").lower()

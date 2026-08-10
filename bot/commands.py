@@ -187,7 +187,8 @@ async def cmd_settings(message: Message, ctx) -> None:
         f" · Conc {s.score_weight_concentration:.2f} · Bundle {s.score_weight_bundle:.2f}",
         "",
         "🛡 <b>Защита</b>",
-        f"  Тренд роста:   ≥ {s.min_trend_percent:.1f}% за {s.stability_check_seconds:.0f}с",
+        f"  Тренд роста:   ≥ {s.min_trend_percent:.1f}% за {s.stability_check_seconds:.0f}с"
+        f"  (таймаут {s.trend_wait_timeout}с, проверка каждые {s.trend_recheck_interval}с)",
         f"  Антиволат. A:  рост ≤ {s.max_price_increase_percent:.0f}% за {s.stability_check_seconds:.0f}с",
         f"  Антиволат. B:  разворот ≥ {s.sharp_reversal_drop_percent:.0f}% от пика за {s.stability_check_seconds:.0f}с",
     ]

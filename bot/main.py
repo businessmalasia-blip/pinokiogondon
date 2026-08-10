@@ -213,6 +213,10 @@ async def wait_for_mc_range(
     dumped_since: Optional[float] = None
     last_fresh_at = time.monotonic()
     mc_history: deque = deque()  # (monotonic_time, mc) для проверки стабильности
+    # Таймер ожидания тренда: запускается при первом провале TREND,
+    # сбрасывается при успехе. 0.0 = проверить немедленно.
+    trend_wait_started: Optional[float] = None
+    trend_next_check: float = 0.0
     while time.monotonic() < deadline:
         mc = await market_cap(ctx, bonding_curve)
         if mc is not None:
@@ -295,17 +299,57 @@ async def wait_for_mc_range(
             )
             # Фильтр TREND DIRECTION: рост капы ≥ MIN_TREND_PERCENT за STABILITY_CHECK_SECONDS
             if s.min_trend_percent > 0:
-                trend_cutoff = time.monotonic() - s.stability_check_seconds
-                oldest_mc = next((m for t, m in mc_history if t >= trend_cutoff), None)
-                if oldest_mc is not None and oldest_mc > 0:
-                    growth_pct = (confirm_mc - oldest_mc) / oldest_mc * 100
-                    if growth_pct < s.min_trend_percent:
+                _tnow = time.monotonic()
+                if _tnow >= trend_next_check:
+                    # Время проверять тренд
+                    _tcutoff = _tnow - s.stability_check_seconds
+                    _oldest = next((m for t, m in mc_history if t >= _tcutoff), None)
+                    if _oldest is not None and _oldest > 0:
+                        _growth = (confirm_mc - _oldest) / _oldest * 100
+                        if _growth < s.min_trend_percent:
+                            if trend_wait_started is None:
+                                trend_wait_started = _tnow
+                                log.info(
+                                    "[%s] TREND: рост %.1f%% за %.0fс < %.1f%% — жду тренд"
+                                    " (таймаут %.0fс, проверка каждые %.0fс)",
+                                    mint, _growth, s.stability_check_seconds,
+                                    s.min_trend_percent, s.trend_wait_timeout,
+                                    s.trend_recheck_interval,
+                                )
+                            elif _tnow - trend_wait_started > s.trend_wait_timeout:
+                                log.info(
+                                    "[%s] TREND: таймаут %.0fс истёк — алерт не отправляется",
+                                    mint, s.trend_wait_timeout,
+                                )
+                                return None
+                            else:
+                                log.info(
+                                    "[%s] TREND: рост %.1f%% < %.1f%% (ожидание %.0f/%.0fс)",
+                                    mint, _growth, s.min_trend_percent,
+                                    _tnow - trend_wait_started, s.trend_wait_timeout,
+                                )
+                            trend_next_check = _tnow + s.trend_recheck_interval
+                            await asyncio.sleep(s.mc_poll_interval)
+                            continue
+                        # Тренд есть
+                        if trend_wait_started is not None:
+                            log.info(
+                                "[%s] ✅ TREND OK: рост %.1f%% за %.0fс"
+                                " (ожидал %.0fс)",
+                                mint, _growth, s.stability_check_seconds,
+                                _tnow - trend_wait_started,
+                            )
+                        trend_wait_started = None
+                elif trend_wait_started is not None:
+                    # Ещё в режиме ожидания, следующая проверка позже
+                    if time.monotonic() - trend_wait_started > s.trend_wait_timeout:
                         log.info(
-                            "[%s] TREND: рост %.1f%% за %.0fс < MIN_TREND_PERCENT %.1f%% — жду",
-                            mint, growth_pct, s.stability_check_seconds, s.min_trend_percent,
+                            "[%s] TREND: таймаут %.0fс истёк — алерт не отправляется",
+                            mint, s.trend_wait_timeout,
                         )
-                        await asyncio.sleep(s.mc_poll_interval)
-                        continue
+                        return None
+                    await asyncio.sleep(s.mc_poll_interval)
+                    continue
             return confirm_mc
         if mc is not None and s.mc_wait_abort_below > 0:
             if mc < s.mc_wait_abort_below:
