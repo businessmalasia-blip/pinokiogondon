@@ -162,8 +162,8 @@ def load_settings() -> Settings:
         bonding_curve_exclude_percent=float(
             os.getenv("BONDING_CURVE_EXCLUDE_PERCENT", "50")
         ),
-        holder_max_percent=float(os.getenv("MAX_SINGLE_HOLDER_PERCENT", "6.0")),
-        top10_max_percent=float(os.getenv("MAX_TOP10_HOLDERS_PERCENT", "18.0")),
+        holder_max_percent=float(os.getenv("MAX_SINGLE_HOLDER_PERCENT", "100.0")),
+        top10_max_percent=float(os.getenv("MAX_TOP10_HOLDERS_PERCENT", "100.0")),
         human_min_percent=float(os.getenv("HUMAN_MIN_PERCENT", "60")),
         unknown_max_percent=float(os.getenv("UNKNOWN_MAX_PERCENT", "15")),
         human_min_percent_unknown=float(os.getenv("HUMAN_MIN_PERCENT_UNKNOWN", "55")),

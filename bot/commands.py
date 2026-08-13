@@ -174,7 +174,8 @@ async def cmd_settings(message: Message, ctx) -> None:
         f"  Покупателей / 5 мин: ≥ {s.min_unique_buyers_5min}",
         "",
         "🎯 <b>Качество токена</b>",
-        f"  Макс. холдер:  ≤ {s.holder_max_percent}%  ·  Топ-10: ≤ {s.top10_max_percent}%",
+        f"  Макс. холдер:  {'отключён' if s.holder_max_percent >= 100 else f'≤ {s.holder_max_percent}%'}"
+        f"  ·  Топ-10: {'отключён' if s.top10_max_percent >= 100 else f'≤ {s.top10_max_percent}%'}",
         f"  HUMAN:         ≥ {s.human_min_percent:.0f}%  ·  UNKNOWN: ≤ {s.unknown_max_percent:.0f}%",
         f"  Бандлы:        ≤ {s.max_bundle_percent:.0f}%",
         f"  MSR:           ≥ {s.msr_min_percent:.0f}%  (мин. {s.dev_min_tokens} токена, {s.dev_history_days} дн.)",
