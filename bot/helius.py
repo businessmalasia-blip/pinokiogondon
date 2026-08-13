@@ -59,30 +59,38 @@ class HeliusClient:
             self._last_request_at = time.monotonic()
 
     async def request(self, method: str, params: Any) -> Any:
-        await self._throttle()
-        self._record_calls(1)
-        payload = {
-            "jsonrpc": "2.0",
-            "id": next(self._id_counter),
-            "method": method,
-            "params": params,
-        }
-        try:
-            async with self._session.post(
-                self._rpc_url,
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=20),
-            ) as resp:
-                data = await resp.json()
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-            log.warning("Helius %s: сетевая ошибка: %s", method, exc)
-            return None
-        if not isinstance(data, dict):
-            return None
-        if "error" in data:
-            log.warning("Helius %s: ошибка RPC: %s", method, data["error"])
-            return None
-        return data.get("result")
+        for attempt in range(2):  # максимум 1 повтор при 429
+            await self._throttle()
+            self._record_calls(1)
+            payload = {
+                "jsonrpc": "2.0",
+                "id": next(self._id_counter),
+                "method": method,
+                "params": params,
+            }
+            try:
+                async with self._session.post(
+                    self._rpc_url,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=20),
+                ) as resp:
+                    if resp.status == 429:
+                        if attempt == 0:
+                            log.warning("Helius %s: 429 — повтор", method)
+                            continue
+                        log.warning("Helius %s: SKIPPED due to 429", method)
+                        return None
+                    data = await resp.json()
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                log.warning("Helius %s: сетевая ошибка: %s", method, exc)
+                return None
+            if not isinstance(data, dict):
+                return None
+            if "error" in data:
+                log.warning("Helius %s: ошибка RPC: %s", method, data["error"])
+                return None
+            return data.get("result")
+        return None
 
     async def _sequential_fallback(self, requests: list[tuple[str, Any]]) -> list[Any]:
         """Одиночные вызовы через общий rate limiter (пауза перед каждым)."""
@@ -102,44 +110,58 @@ class HeliusClient:
         if self._batch_supported is False:
             return await self._sequential_fallback(requests)
 
-        self._record_calls(len(requests))
-        await self._throttle()
         payload = [
             {"jsonrpc": "2.0", "id": i, "method": method, "params": params}
             for i, (method, params) in enumerate(requests)
         ]
-        try:
-            async with self._session.post(
-                self._rpc_url,
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as resp:
-                data = await resp.json()
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-            log.warning("Helius batch (%d вызовов): сетевая ошибка: %s", len(requests), exc)
-            return [None] * len(requests)
+        for attempt in range(2):  # максимум 1 повтор при 429
+            self._record_calls(len(requests))
+            await self._throttle()
+            try:
+                async with self._session.post(
+                    self._rpc_url,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    if resp.status == 429:
+                        if attempt == 0:
+                            log.warning(
+                                "Helius batch (%d вызовов): 429 — повтор",
+                                len(requests),
+                            )
+                            continue
+                        log.warning(
+                            "Helius batch (%d вызовов): SKIPPED due to 429",
+                            len(requests),
+                        )
+                        return [None] * len(requests)
+                    data = await resp.json()
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                log.warning("Helius batch (%d вызовов): сетевая ошибка: %s", len(requests), exc)
+                return [None] * len(requests)
 
-        if isinstance(data, dict):
-            # Сервер ответил одним объектом-ошибкой — батчи на тарифе запрещены
-            log.info(
-                "Helius batch отклонён тарифом (%s) — переключаюсь на одиночные запросы",
-                (data.get("error") or {}).get("message", "?"),
-            )
-            self._batch_supported = False
-            return await self._sequential_fallback(requests)
-        if not isinstance(data, list):
-            log.warning("Helius batch: неожиданный ответ: %s", str(data)[:200])
-            return [None] * len(requests)
+            if isinstance(data, dict):
+                # Сервер ответил одним объектом-ошибкой — батчи на тарифе запрещены
+                log.info(
+                    "Helius batch отклонён тарифом (%s) — переключаюсь на одиночные запросы",
+                    (data.get("error") or {}).get("message", "?"),
+                )
+                self._batch_supported = False
+                return await self._sequential_fallback(requests)
+            if not isinstance(data, list):
+                log.warning("Helius batch: неожиданный ответ: %s", str(data)[:200])
+                return [None] * len(requests)
 
-        self._batch_supported = True
-        by_id = {item.get("id"): item for item in data if isinstance(item, dict)}
-        results: list[Any] = []
-        for i in range(len(requests)):
-            item = by_id.get(i, {})
-            if "error" in item:
-                log.warning("Helius batch #%d: ошибка RPC: %s", i, item["error"])
-            results.append(item.get("result"))
-        return results
+            self._batch_supported = True
+            by_id = {item.get("id"): item for item in data if isinstance(item, dict)}
+            results: list[Any] = []
+            for i in range(len(requests)):
+                item = by_id.get(i, {})
+                if "error" in item:
+                    log.warning("Helius batch #%d: ошибка RPC: %s", i, item["error"])
+                results.append(item.get("result"))
+            return results
+        return [None] * len(requests)
 
     # ----- Стандартные RPC-методы -----
 

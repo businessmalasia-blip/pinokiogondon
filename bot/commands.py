@@ -192,6 +192,12 @@ async def cmd_settings(message: Message, ctx) -> None:
         f"  (таймаут {s.trend_wait_timeout}с, проверка каждые {s.trend_recheck_interval}с)",
         f"  Антиволат. A:  рост ≤ {s.max_price_increase_percent:.0f}% за {s.stability_check_seconds:.0f}с",
         f"  Антиволат. B:  разворот ≥ {s.sharp_reversal_drop_percent:.0f}% от пика за {s.stability_check_seconds:.0f}с",
+        "",
+        "⚙️ <b>Инфраструктура</b>",
+        f"  Helius rate limit:  {s.helius_rate_limit:.1f}с/запрос",
+        f"  DAS retry:          {s.das_retries} повтор, задержка {s.das_retry_delay:.0f}с",
+        f"  Параллельный старт (sigs + asset): ✅",
+        f"  429 защита:         1 повтор → SKIPPED",
     ]
     await message.answer("\n".join(lines))
 

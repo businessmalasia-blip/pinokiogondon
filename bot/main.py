@@ -443,12 +443,11 @@ async def analyze_token(
     s = ctx.settings
     log.info("[%s] 🔎 запускаю анализ (bonding curve %s)", mint, bonding_curve)
 
-    # Сигнатуры минта: один запрос, дальше переиспользуется предпроверками,
-    # бандл-метрикой и check_dev (никаких повторных вызовов)
-    mint_signatures = await ctx.helius.get_signatures(mint, limit=1000)
-
-    # Имя/тикер/картинка + created_at одним getAsset (кэшируем для алерта)
-    asset = await ctx.helius.get_asset(mint)
+    # Параллельный старт: сигнатуры и метаданные независимы — запускаем вместе
+    mint_signatures, asset = await asyncio.gather(
+        ctx.helius.get_signatures(mint, limit=1000),
+        ctx.helius.get_asset(mint),
+    )
     name, symbol, image_url = extract_token_meta(asset)
 
     # --- Предварительная проверка 2.1: возраст токена ---

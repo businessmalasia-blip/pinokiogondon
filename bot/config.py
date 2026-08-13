@@ -191,8 +191,8 @@ def load_settings() -> Settings:
         max_concurrent_analyses=int(os.getenv("MAX_CONCURRENT_ANALYSES", "3")),
         candidate_queue_size=int(os.getenv("CANDIDATE_QUEUE_SIZE", "100")),
         das_min_accounts=int(os.getenv("DAS_MIN_ACCOUNTS", "15")),
-        das_retry_delay=float(os.getenv("DAS_RETRY_DELAY", "12")),
-        das_retries=int(os.getenv("DAS_RETRIES", "2")),
+        das_retry_delay=float(os.getenv("DAS_RETRY_DELAY", "3")),
+        das_retries=int(os.getenv("DAS_RETRIES", "1")),
         ws_rpc_url=os.getenv(
             "WS_RPC_URL",
             "wss://api.mainnet-beta.solana.com",
