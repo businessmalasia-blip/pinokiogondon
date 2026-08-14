@@ -189,6 +189,34 @@ async def _check_dev_early_buy(
     return False
 
 
+async def _check_dev_early_sell(
+    ctx: "Context", mint: str, creator: str, mint_signatures: list[dict]
+) -> bool:
+    """True если дев продал токен среди первых 10 транзакций минта."""
+    from .pump import fee_payer as _fee_payer, parse_trade_event
+
+    # mint_signatures отсортированы новые→старые; берём 10 самых ранних
+    oldest_sigs = [
+        sig["signature"]
+        for sig in list(reversed(mint_signatures))[:10]
+        if not sig.get("err") and sig.get("signature")
+    ]
+    if not oldest_sigs:
+        return False
+    txs = await ctx.helius.get_transactions_batch(oldest_sigs)
+    for tx in txs:
+        if not tx:
+            continue
+        fp = _fee_payer(tx)
+        if fp != creator:
+            continue
+        for line in (tx.get("meta") or {}).get("logMessages") or []:
+            event = parse_trade_event(line)
+            if event and not event["is_buy"] and event["mint"] == mint:
+                return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Ожидание входа капы в целевой диапазон
 # ---------------------------------------------------------------------------
@@ -581,19 +609,35 @@ async def analyze_token(
                 return
             log.info("[%s] ✔ dev early buy подтверждён (%s)", mint, creator)
 
-    # Unknown-дев (нет истории) — ужесточаем требования к HUMAN/UNKNOWN.
-    # unknown_percent = 100 - human_percent (третьего состояния нет)
+    # Проверка ранней продажи дева (первые 10 транзакций минта)
+    early_sell_creator = await get_creator(mint, ctx.helius, mint_signatures)
+    if early_sell_creator and await _check_dev_early_sell(
+        ctx, mint, early_sell_creator, mint_signatures
+    ):
+        log.info(
+            "[%s] ❌ ОТСЕЯН DEV_EARLY_SELL: дев %s продал в первых 10 tx",
+            mint, early_sell_creator,
+        )
+        await ctx.stats.record_filter_result(mint, "dev")
+        await ctx.redis.set(f"seen:{mint}", "1", ex=s.seen_mint_ttl)
+        return
+
+    # Unknown-дев — требуем HUMAN ≥ 70% и Score ≥ 8.0
     if dev["status"] == "Unknown":
-        unknown_percent = 100.0 - human_percent
-        if (
-            human_percent < s.human_min_percent_unknown
-            or unknown_percent > s.unknown_max_percent_unknown
-        ):
+        unknown_score = calculate_score(
+            {
+                "human_percent": human_percent,
+                "msr": None,
+                "top10_percent": top10_percent,
+                "bundle_percent": bundle_percent,
+            },
+            s,
+        )
+        if human_percent < 70.0 or unknown_score["total"] < 8.0:
             log.info(
-                "[%s] ❌ ОТСЕЯН: Unknown-дев + HUMAN %.0f%%/UNKNOWN %.0f%% "
-                "(нужно ≥%.0f/≤%.0f)",
-                mint, human_percent, unknown_percent,
-                s.human_min_percent_unknown, s.unknown_max_percent_unknown,
+                "[%s] ❌ ОТСЕЯН: Unknown-дев + HUMAN %.0f%% / Score %.1f "
+                "(нужно ≥70%% / ≥8.0)",
+                mint, human_percent, unknown_score["total"],
             )
             await ctx.stats.record_filter_result(mint, "human_strict")
             await ctx.redis.set(f"seen:{mint}", "1", ex=s.analysis_retry_ttl)
