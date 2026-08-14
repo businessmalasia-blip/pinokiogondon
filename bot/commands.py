@@ -153,7 +153,7 @@ async def cmd_settings(message: Message, ctx) -> None:
     if not _allowed(message, ctx):
         return
     s = ctx.settings
-    early_buy = "✅ вкл" if s.dev_early_buy_required else "❌ откл"
+    early_buy = "✅ вкл" if s.dev_early_buy_required else "❌ отключена"
     lines = [
         "⚙️ <b>Настройки скринера</b>",
         "",

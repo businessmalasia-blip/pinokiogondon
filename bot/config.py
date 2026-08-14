@@ -210,7 +210,7 @@ def load_settings() -> Settings:
         trend_recheck_interval=int(os.getenv("TREND_RECHECK_INTERVAL", "60")),
         min_volume_usd_5min=float(os.getenv("MIN_VOLUME_USD_5MIN", "150.0")),
         min_unique_buyers_5min=int(os.getenv("MIN_UNIQUE_BUYERS_5MIN", "2")),
-        dev_early_buy_required=os.getenv("DEV_EARLY_BUY_REQUIRED", "true").lower()
+        dev_early_buy_required=os.getenv("DEV_EARLY_BUY_REQUIRED", "false").lower()
         in ("1", "true", "yes"),
         dev_early_buy_window=int(os.getenv("DEV_EARLY_BUY_WINDOW", "300")),
         analysis_retry_ttl=int(os.getenv("ANALYSIS_RETRY_TTL", "180")),
