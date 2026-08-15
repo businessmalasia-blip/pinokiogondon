@@ -622,27 +622,6 @@ async def analyze_token(
         await ctx.redis.set(f"seen:{mint}", "1", ex=s.seen_mint_ttl)
         return
 
-    # Unknown-дев — требуем HUMAN ≥ 70% и Score ≥ 8.0
-    if dev["status"] == "Unknown":
-        unknown_score = calculate_score(
-            {
-                "human_percent": human_percent,
-                "msr": None,
-                "top10_percent": top10_percent,
-                "bundle_percent": bundle_percent,
-            },
-            s,
-        )
-        if human_percent < 70.0 or unknown_score["total"] < 8.0:
-            log.info(
-                "[%s] ❌ ОТСЕЯН: Unknown-дев + HUMAN %.0f%% / Score %.1f "
-                "(нужно ≥70%% / ≥8.0)",
-                mint, human_percent, unknown_score["total"],
-            )
-            await ctx.stats.record_filter_result(mint, "human_strict")
-            await ctx.redis.set(f"seen:{mint}", "1", ex=s.analysis_retry_ttl)
-            return
-
     # Скоринг по посчитанным метрикам — единственный решающий порог
     score = calculate_score(
         {
