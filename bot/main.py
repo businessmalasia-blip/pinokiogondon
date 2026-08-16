@@ -260,15 +260,16 @@ async def wait_for_mc_range(
             return None
         if mc is not None and s.alert_mc_min <= mc <= s.alert_mc_max:
             # Проверка торговых сессий (EU / US)
-            _session = _trading_session(s)
-            if _session is None:
-                log.info(
-                    "[%s] TRADING_HOURS: outside EU/US sessions — ожидаю",
-                    mint,
-                )
-                await asyncio.sleep(s.mc_poll_interval)
-                continue
-            log.info("[%s] TRADING_HOURS: %s session активна", mint, _session)
+            if s.trading_hours_enabled:
+                _session = _trading_session(s)
+                if _session is None:
+                    log.info(
+                        "[%s] TRADING_HOURS: outside EU/US sessions — ожидаю",
+                        mint,
+                    )
+                    await asyncio.sleep(s.mc_poll_interval)
+                    continue
+                log.info("[%s] TRADING_HOURS: %s session активна", mint, _session)
             # Anti-Volatility: два условия блокировки (любое из них → ждём)
             _now_mono = time.monotonic()
             _av_blocked = False
@@ -610,17 +611,18 @@ async def analyze_token(
             log.info("[%s] ✔ dev early buy подтверждён (%s)", mint, creator)
 
     # Проверка ранней продажи дева (первые 10 транзакций минта)
-    early_sell_creator = await get_creator(mint, ctx.helius, mint_signatures)
-    if early_sell_creator and await _check_dev_early_sell(
-        ctx, mint, early_sell_creator, mint_signatures
-    ):
-        log.info(
-            "[%s] ❌ ОТСЕЯН DEV_EARLY_SELL: дев %s продал в первых 10 tx",
-            mint, early_sell_creator,
-        )
-        await ctx.stats.record_filter_result(mint, "dev")
-        await ctx.redis.set(f"seen:{mint}", "1", ex=s.seen_mint_ttl)
-        return
+    if s.dev_early_sell_protection:
+        early_sell_creator = await get_creator(mint, ctx.helius, mint_signatures)
+        if early_sell_creator and await _check_dev_early_sell(
+            ctx, mint, early_sell_creator, mint_signatures
+        ):
+            log.info(
+                "[%s] ❌ ОТСЕЯН DEV_EARLY_SELL: дев %s продал в первых 10 tx",
+                mint, early_sell_creator,
+            )
+            await ctx.stats.record_filter_result(mint, "dev")
+            await ctx.redis.set(f"seen:{mint}", "1", ex=s.seen_mint_ttl)
+            return
 
     # Скоринг по посчитанным метрикам — единственный решающий порог
     score = calculate_score(

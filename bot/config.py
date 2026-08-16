@@ -59,9 +59,6 @@ class Settings:
     # Фильтр 2: HUMAN
     human_min_percent: float
     unknown_max_percent: float
-    # Ужесточённые пороги для Unknown-девов (защита от рагпулов)
-    human_min_percent_unknown: float
-    unknown_max_percent_unknown: float
     human_cache_ttl: int
     unknown_cache_ttl: int
     human_check_top: int
@@ -87,6 +84,9 @@ class Settings:
     dev_tx_limit: int
     dev_tokens_check_max: int
     survivor_min_volume_usd: float
+    dev_early_buy_required: bool
+    dev_early_buy_window: int
+    dev_early_sell_protection: bool
 
     # WebSocket (отдельный URL — не Helius, чтобы не тратить streaming-кредиты)
     ws_rpc_url: str
@@ -94,10 +94,10 @@ class Settings:
     # Стабильный рост (Anti-Volatility)
     max_price_increase_percent: float
     stability_check_seconds: float
-    # Мгновенный разворот: падение от пика на этот % за < STABILITY_CHECK_SECONDS сек
     sharp_reversal_drop_percent: float
 
     # Торговые сессии
+    trading_hours_enabled: bool
     timezone: str
     eu_session_start: int
     eu_session_end: int
@@ -112,9 +112,6 @@ class Settings:
     min_volume_usd_5min: float
     # Фильтр: уникальных покупателей за 5 мин
     min_unique_buyers_5min: int
-    # Фильтр: дев купил токен в первые N сек после создания
-    dev_early_buy_required: bool
-    dev_early_buy_window: int
 
     # Прочее
     seen_mint_ttl: int
@@ -132,7 +129,6 @@ class Settings:
         return f"https://mainnet.helius-rpc.com/?api-key={self.helius_api_key}"
 
 
-
 def load_settings() -> Settings:
     return Settings(
         helius_api_key=_env("HELIUS_API_KEY"),
@@ -144,7 +140,7 @@ def load_settings() -> Settings:
         ),
         buy_mint_index=int(os.getenv("BUY_MINT_INDEX", "2")),
         buy_bonding_curve_index=int(os.getenv("BUY_BONDING_CURVE_INDEX", "3")),
-        mc_analyze_min=float(os.getenv("MC_ANALYZE_MIN", "8000")),
+        mc_analyze_min=float(os.getenv("MC_ANALYZE_MIN", "7000")),
         mc_analyze_max=float(os.getenv("MC_ANALYZE_MAX", "13000")),
         alert_mc_min=float(os.getenv("MIN_CAP_ALERT", "9000")),
         alert_mc_max=float(os.getenv("MAX_CAP_ALERT", "12000")),
@@ -165,9 +161,7 @@ def load_settings() -> Settings:
         holder_max_percent=float(os.getenv("MAX_SINGLE_HOLDER_PERCENT", "7.0")),
         top10_max_percent=float(os.getenv("MAX_TOP10_HOLDERS_PERCENT", "22.0")),
         human_min_percent=float(os.getenv("HUMAN_MIN_PERCENT", "60")),
-        unknown_max_percent=float(os.getenv("UNKNOWN_MAX_PERCENT", "15")),
-        human_min_percent_unknown=float(os.getenv("HUMAN_MIN_PERCENT_UNKNOWN", "55")),
-        unknown_max_percent_unknown=float(os.getenv("UNKNOWN_MAX_PERCENT_UNKNOWN", "20")),
+        unknown_max_percent=float(os.getenv("UNKNOWN_MAX_PERCENT", "20")),
         human_cache_ttl=int(os.getenv("HUMAN_CACHE_TTL", "3600")),
         unknown_cache_ttl=int(os.getenv("UNKNOWN_CACHE_TTL", "3600")),
         human_check_top=int(os.getenv("HUMAN_CHECK_TOP", "30")),
@@ -176,7 +170,7 @@ def load_settings() -> Settings:
         bundle_slot_window=int(os.getenv("BUNDLE_SLOT_WINDOW", "2")),
         min_buy_count_last_2min=int(os.getenv("MIN_BUY_COUNT_LAST_2MIN", "2")),
         max_bundle_percent=float(os.getenv("MAX_BUNDLE_PERCENT", "20.0")),
-        min_score=float(os.getenv("MIN_SCORE", "8.0")),
+        min_score=float(os.getenv("MIN_SCORE", "7.5")),
         score_weight_human=float(os.getenv("SCORE_WEIGHT_HUMAN", "0.30")),
         score_weight_msr=float(os.getenv("SCORE_WEIGHT_MSR", "0.25")),
         score_weight_concentration=float(os.getenv("SCORE_WEIGHT_CONCENTRATION", "0.25")),
@@ -187,6 +181,11 @@ def load_settings() -> Settings:
         dev_tx_limit=int(os.getenv("DEV_TX_LIMIT", "50")),
         dev_tokens_check_max=int(os.getenv("DEV_TOKENS_CHECK_MAX", "20")),
         survivor_min_volume_usd=float(os.getenv("SURVIVOR_MIN_VOLUME_USD", "1000")),
+        dev_early_buy_required=os.getenv("DEV_EARLY_BUY_REQUIRED", "false").lower()
+        in ("1", "true", "yes"),
+        dev_early_buy_window=int(os.getenv("DEV_EARLY_BUY_WINDOW", "300")),
+        dev_early_sell_protection=os.getenv("DEV_EARLY_SELL_PROTECTION", "true").lower()
+        in ("1", "true", "yes"),
         seen_mint_ttl=int(os.getenv("SEEN_MINT_TTL", "3600")),
         max_concurrent_analyses=int(os.getenv("MAX_CONCURRENT_ANALYSES", "3")),
         candidate_queue_size=int(os.getenv("CANDIDATE_QUEUE_SIZE", "100")),
@@ -200,6 +199,8 @@ def load_settings() -> Settings:
         max_price_increase_percent=float(os.getenv("MAX_PRICE_INCREASE_PERCENT", "30.0")),
         stability_check_seconds=float(os.getenv("STABILITY_CHECK_SECONDS", "60.0")),
         sharp_reversal_drop_percent=float(os.getenv("SHARP_REVERSAL_DROP_PERCENT", "10.0")),
+        trading_hours_enabled=os.getenv("TRADING_HOURS_ENABLED", "false").lower()
+        in ("1", "true", "yes"),
         timezone=os.getenv("TIMEZONE", "Europe/Moscow"),
         eu_session_start=int(os.getenv("EU_SESSION_START", "10")),
         eu_session_end=int(os.getenv("EU_SESSION_END", "16")),
@@ -210,9 +211,6 @@ def load_settings() -> Settings:
         trend_recheck_interval=int(os.getenv("TREND_RECHECK_INTERVAL", "60")),
         min_volume_usd_5min=float(os.getenv("MIN_VOLUME_USD_5MIN", "150.0")),
         min_unique_buyers_5min=int(os.getenv("MIN_UNIQUE_BUYERS_5MIN", "2")),
-        dev_early_buy_required=os.getenv("DEV_EARLY_BUY_REQUIRED", "false").lower()
-        in ("1", "true", "yes"),
-        dev_early_buy_window=int(os.getenv("DEV_EARLY_BUY_WINDOW", "300")),
         analysis_retry_ttl=int(os.getenv("ANALYSIS_RETRY_TTL", "180")),
         alert_dedup_ttl=int(os.getenv("ALERT_DEDUP_TTL", "86400")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
