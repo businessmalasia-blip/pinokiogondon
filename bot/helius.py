@@ -1,4 +1,11 @@
-"""Клиент Helius (RPC + DAS) с общим rate limiting для всех запросов."""
+"""Клиент Helius (DAS) + публичный Solana RPC для стандартных методов.
+
+Helius тратит кредиты на каждый запрос. Стандартные RPC-методы
+(getAccountInfo, getSignaturesForAddress, getTransaction и т.п.) работают
+на любом Solana-узле, поэтому направляем их на бесплатный публичный RPC.
+Helius используется только для DAS (getAsset) — это единственный метод,
+требующий именно Helius-узла.
+"""
 
 import asyncio
 import itertools
@@ -16,22 +23,22 @@ class HeliusClient:
     def __init__(
         self,
         session: aiohttp.ClientSession,
-        rpc_url: str,
+        rpc_url: str,           # Helius — только для DAS (getAsset)
+        public_rpc_url: str,    # Публичный Solana RPC — для стандартных методов
         rate_limit: float,
     ) -> None:
         self._session = session
         self._rpc_url = rpc_url
+        self._public_url = public_rpc_url
         self._rate_limit = rate_limit
         self._lock = asyncio.Lock()
         self._last_request_at = 0.0
         self._id_counter = itertools.count(1)
-        # None — ещё не знаем; False — тариф Helius отверг batch, ходим одиночными
-        self._batch_supported: Optional[bool] = None
-        # Скользящее окно 24ч для подсчёта кредитов Helius
+        # Скользящее окно 24ч для подсчёта кредитов Helius (только DAS-вызовы)
         self._call_timestamps: deque = deque()
 
     def _record_calls(self, count: int = 1) -> None:
-        """Фиксирует count RPC-вызовов для статистики расхода кредитов."""
+        """Фиксирует count Helius DAS-вызовов для статистики расхода кредитов."""
         now = time.time()
         for _ in range(count):
             self._call_timestamps.append(now)
@@ -40,7 +47,7 @@ class HeliusClient:
             self._call_timestamps.popleft()
 
     def calls_last_24h(self) -> int:
-        """Количество RPC-вызовов к Helius за последние 24 часа."""
+        """Количество Helius DAS-вызовов за последние 24 часа."""
         cutoff = time.time() - 86400
         count = 0
         for t in reversed(self._call_timestamps):
@@ -58,23 +65,11 @@ class HeliusClient:
                 await asyncio.sleep(wait)
             self._last_request_at = time.monotonic()
 
-    async def _throttle_n(self, n: int) -> None:
-        """Throttle для батча из n запросов.
-
-        Helius считает каждый элемент батча как отдельный кредит, поэтому
-        pre-charge rate limiter пропорционально: следующий вызов будет ждать
-        как будто мы сделали n одиночных запросов подряд.
-        """
-        async with self._lock:
-            now = time.monotonic()
-            wait = self._last_request_at + self._rate_limit - now
-            if wait > 0:
-                await asyncio.sleep(wait)
-            # Сдвигаем окно на n запросов вперёд
-            self._last_request_at = time.monotonic() + self._rate_limit * (n - 1)
+    # ----- Helius DAS (rate-limited, credit-tracked) -----
 
     async def request(self, method: str, params: Any) -> Any:
-        for attempt in range(2):  # максимум 1 повтор при 429
+        """Запрос к Helius — только для DAS-методов (getAsset и т.п.)."""
+        for attempt in range(2):
             await self._throttle()
             self._record_calls(1)
             payload = {
@@ -107,82 +102,89 @@ class HeliusClient:
             return data.get("result")
         return None
 
-    async def _sequential_fallback(self, requests: list[tuple[str, Any]]) -> list[Any]:
-        """Одиночные вызовы через общий rate limiter (пауза перед каждым)."""
-        return [await self.request(method, params) for method, params in requests]
+    # ----- Публичный Solana RPC (без кредитов Helius, без rate limiting) -----
 
-    async def batch_request(self, requests: list[tuple[str, Any]]) -> list[Any]:
-        """JSON-RPC batch: несколько вызовов в одном HTTP-запросе.
+    async def _pub_request(self, method: str, params: Any) -> Any:
+        """Запрос к публичному Solana RPC — не расходует кредиты Helius."""
+        for attempt in range(2):
+            payload = {
+                "jsonrpc": "2.0",
+                "id": next(self._id_counter),
+                "method": method,
+                "params": params,
+            }
+            try:
+                async with self._session.post(
+                    self._public_url,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=20),
+                ) as resp:
+                    if resp.status == 429:
+                        if attempt == 0:
+                            await asyncio.sleep(1)
+                            continue
+                        log.warning("PublicRPC %s: SKIPPED due to 429", method)
+                        return None
+                    data = await resp.json()
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                log.warning("PublicRPC %s: сетевая ошибка: %s", method, exc)
+                return None
+            if not isinstance(data, dict):
+                return None
+            if "error" in data:
+                log.warning("PublicRPC %s: ошибка RPC: %s", method, data["error"])
+                return None
+            return data.get("result")
+        return None
 
-        Проходит через тот же rate limiter одной паузой на весь батч.
-        Бесплатный тариф Helius отвергает батчи ("max usage reached") —
-        в этом случае клиент запоминает это и дальше ходит одиночными
-        запросами с обычным rate limiting.
-        Возвращает результаты в порядке запросов (None для ошибочных).
-        """
+    async def _pub_batch_request(self, requests: list[tuple[str, Any]]) -> list[Any]:
+        """JSON-RPC batch к публичному Solana RPC."""
         if not requests:
             return []
-        if self._batch_supported is False:
-            return await self._sequential_fallback(requests)
-
         payload = [
             {"jsonrpc": "2.0", "id": i, "method": method, "params": params}
             for i, (method, params) in enumerate(requests)
         ]
-        for attempt in range(2):  # максимум 1 повтор при 429
-            self._record_calls(len(requests))
-            await self._throttle_n(len(requests))
+        for attempt in range(2):
             try:
                 async with self._session.post(
-                    self._rpc_url,
+                    self._public_url,
                     json=payload,
                     timeout=aiohttp.ClientTimeout(total=30),
                 ) as resp:
                     if resp.status == 429:
                         if attempt == 0:
-                            log.warning(
-                                "Helius batch (%d вызовов): 429 — повтор",
-                                len(requests),
-                            )
+                            await asyncio.sleep(1)
                             continue
-                        log.warning(
-                            "Helius batch (%d вызовов): SKIPPED due to 429",
-                            len(requests),
-                        )
                         return [None] * len(requests)
                     data = await resp.json()
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                log.warning("Helius batch (%d вызовов): сетевая ошибка: %s", len(requests), exc)
+                log.warning("PublicRPC batch (%d): сетевая ошибка: %s", len(requests), exc)
                 return [None] * len(requests)
 
             if isinstance(data, dict):
-                # Сервер ответил одним объектом-ошибкой — батчи на тарифе запрещены
-                log.info(
-                    "Helius batch отклонён тарифом (%s) — переключаюсь на одиночные запросы",
-                    (data.get("error") or {}).get("message", "?"),
-                )
-                self._batch_supported = False
-                return await self._sequential_fallback(requests)
+                # Публичный RPC не поддерживает батч — переходим на одиночные
+                log.info("PublicRPC batch отклонён — переключаюсь на одиночные запросы")
+                return [await self._pub_request(method, params) for method, params in requests]
             if not isinstance(data, list):
-                log.warning("Helius batch: неожиданный ответ: %s", str(data)[:200])
+                log.warning("PublicRPC batch: неожиданный ответ: %s", str(data)[:200])
                 return [None] * len(requests)
 
-            self._batch_supported = True
             by_id = {item.get("id"): item for item in data if isinstance(item, dict)}
             results: list[Any] = []
             for i in range(len(requests)):
                 item = by_id.get(i, {})
                 if "error" in item:
-                    log.warning("Helius batch #%d: ошибка RPC: %s", i, item["error"])
+                    log.warning("PublicRPC batch #%d: ошибка RPC: %s", i, item["error"])
                 results.append(item.get("result"))
             return results
         return [None] * len(requests)
 
-    # ----- Стандартные RPC-методы -----
+    # ----- Стандартные RPC-методы (через публичный RPC, без кредитов) -----
 
     async def get_account_info(self, address: str) -> Optional[dict]:
         """Свежие данные аккаунта: lamports и data (base64)."""
-        result = await self.request(
+        result = await self._pub_request(
             "getAccountInfo", [address, {"encoding": "base64", "commitment": "confirmed"}]
         )
         if not result:
@@ -190,7 +192,7 @@ class HeliusClient:
         return result.get("value")
 
     async def get_signatures(self, address: str, limit: int = 1) -> list[dict]:
-        result = await self.request(
+        result = await self._pub_request(
             "getSignaturesForAddress",
             [address, {"limit": limit, "commitment": "confirmed"}],
         )
@@ -204,11 +206,11 @@ class HeliusClient:
             ("getSignaturesForAddress", [address, {"limit": limit, "commitment": "confirmed"}])
             for address in addresses
         ]
-        results = await self.batch_request(requests)
+        results = await self._pub_batch_request(requests)
         return {address: (result or []) for address, result in zip(addresses, results)}
 
     async def get_transaction(self, signature: str) -> Optional[dict]:
-        return await self.request(
+        return await self._pub_request(
             "getTransaction",
             [
                 signature,
@@ -222,7 +224,7 @@ class HeliusClient:
 
     async def get_token_largest_accounts(self, mint: str) -> list[dict]:
         """Топ-20 крупнейших токен-аккаунтов минта."""
-        result = await self.request(
+        result = await self._pub_request(
             "getTokenLargestAccounts", [mint, {"commitment": "confirmed"}]
         )
         if not result:
@@ -233,7 +235,7 @@ class HeliusClient:
         """Владельцы токен-аккаунтов одним запросом getMultipleAccounts."""
         if not addresses:
             return {}
-        result = await self.request(
+        result = await self._pub_request(
             "getMultipleAccounts",
             [addresses, {"encoding": "jsonParsed", "commitment": "confirmed"}],
         )
@@ -259,9 +261,9 @@ class HeliusClient:
         requests = [
             ("getTransaction", [sig, params_template]) for sig in signatures
         ]
-        return await self.batch_request(requests)
+        return await self._pub_batch_request(requests)
 
-    # ----- DAS-методы -----
+    # ----- DAS-методы (только через Helius, тратят кредиты) -----
 
     async def get_asset(self, mint: str) -> Optional[dict]:
         """Метаданные токена (название, тикер, картинка) через DAS getAsset."""

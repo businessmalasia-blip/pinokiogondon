@@ -1149,7 +1149,7 @@ async def run() -> None:
     )
 
     async with aiohttp.ClientSession() as http:
-        helius = HeliusClient(http, settings.rpc_http_url, settings.helius_rate_limit)
+        helius = HeliusClient(http, settings.rpc_http_url, settings.public_rpc_url, settings.helius_rate_limit)
         ctx = Context(
             settings=settings,
             redis=redis_client,

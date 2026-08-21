@@ -88,6 +88,9 @@ class Settings:
     dev_early_buy_window: int
     dev_early_sell_protection: bool
 
+    # Публичный Solana RPC для стандартных методов (без кредитов Helius)
+    public_rpc_url: str
+
     # WebSocket (отдельный URL — не Helius, чтобы не тратить streaming-кредиты)
     ws_rpc_url: str
 
@@ -192,6 +195,10 @@ def load_settings() -> Settings:
         das_min_accounts=int(os.getenv("DAS_MIN_ACCOUNTS", "15")),
         das_retry_delay=float(os.getenv("DAS_RETRY_DELAY", "3")),
         das_retries=int(os.getenv("DAS_RETRIES", "1")),
+        public_rpc_url=os.getenv(
+            "PUBLIC_RPC_URL",
+            "https://api.mainnet-beta.solana.com",
+        ),
         ws_rpc_url=os.getenv(
             "WS_RPC_URL",
             "wss://api.mainnet-beta.solana.com",

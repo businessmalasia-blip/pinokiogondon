@@ -68,7 +68,7 @@ async def cmd_status(message: Message, ctx) -> None:
         f"🔍 Транзакций проверено: {counters.get('tx_checked', 0):,}\n"
         f"📈 Расчётов капы: {counters.get('mc_calcs', 0):,}\n"
         f"🔔 Алертов отправлено: {counters.get('alerts_sent', 0):,}\n"
-        f"💳 Кредиты Helius: расход ~{helius_k} тыс./сутки (лимит 1M/мес)"
+        f"💳 Кредиты Helius (DAS): расход ~{helius_k} тыс./сутки (лимит 1M/мес)"
     )
     await message.answer(text)
 
@@ -198,7 +198,8 @@ async def cmd_settings(message: Message, ctx) -> None:
         f"  Репутация покупателей: ✅ вкл (база alpha_wallets)",
         "",
         "⚙️ <b>Инфраструктура</b>",
-        f"  Helius rate limit:  {s.helius_rate_limit:.1f}с/запрос",
+        f"  Helius rate limit:  {s.helius_rate_limit:.1f}с/запрос (только DAS/getAsset)",
+        f"  Стандартные RPC:    публичный Solana RPC (без кредитов)",
         f"  DAS retry:          {s.das_retries} повтор, задержка {s.das_retry_delay:.0f}с",
         f"  Параллельный старт (sigs + asset): ✅",
         f"  429 защита:         1 повтор → SKIPPED",
