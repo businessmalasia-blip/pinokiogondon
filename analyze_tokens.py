@@ -19,9 +19,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "")
-# Ankr — бесплатный архивный RPC, хранит logMessages для старых транзакций,
-# не требует ключа, ~30 req/sec. Не конкурирует с ботом (бот использует Helius).
-RPC_URL_PUBLIC = "https://rpc.ankr.com/solana"
+# Цепочка бесплатных архивных RPC. Если один 429 — переключаемся на следующий.
+ARCHIVE_RPCS = [
+    "https://rpc.ankr.com/solana",
+    "https://solana-rpc.publicnode.com",
+    "https://api.mainnet-beta.solana.com",
+]
+_rpc_idx = 0  # текущий активный RPC в цепочке
 RPC_URL_HELIUS = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 PUMP_PROGRAM   = os.getenv("PUMP_PROGRAM", "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P")
 SOL_PRICE_FALLBACK = 150.0
@@ -49,19 +53,32 @@ def _nid():
 # ── RPC ─────────────────────────────────────────────────────────────────────
 
 async def rpc(session: aiohttp.ClientSession, method: str, params,
-              label="", url: str = RPC_URL_PUBLIC) -> Optional[object]:
+              label="", url: str = None) -> Optional[object]:
+    global _rpc_idx
+    # Если url не задан — используем цепочку архивных RPC
+    use_chain = url is None
     payload = {"jsonrpc": "2.0", "id": _nid(), "method": method, "params": params}
-    for attempt in range(5):
+    for attempt in range(len(ARCHIVE_RPCS) * 2 + 2):
+        target = ARCHIVE_RPCS[_rpc_idx % len(ARCHIVE_RPCS)] if use_chain else url
         try:
-            async with session.post(url, json=payload,
+            async with session.post(target, json=payload,
                                     timeout=aiohttp.ClientTimeout(total=30)) as r:
                 if r.status == 429:
-                    wait = min(2 ** attempt, 30)
-                    print(f"    [429] {label or method} — жду {wait}с")
-                    await asyncio.sleep(wait)
+                    if use_chain:
+                        old_idx = _rpc_idx % len(ARCHIVE_RPCS)
+                        _rpc_idx += 1
+                        new_idx = _rpc_idx % len(ARCHIVE_RPCS)
+                        print(f"    [429→switch] {label or method}: "
+                              f"{ARCHIVE_RPCS[old_idx].split('/')[2]} → "
+                              f"{ARCHIVE_RPCS[new_idx].split('/')[2]}")
+                        await asyncio.sleep(1)
+                    else:
+                        wait = min(2 ** attempt, 30)
+                        print(f"    [429] {label or method} — жду {wait}с")
+                        await asyncio.sleep(wait)
                     continue
                 if r.status != 200:
-                    print(f"    [HTTP {r.status}] {label or method}")
+                    print(f"    [HTTP {r.status}] {label or method} via {target.split('/')[2]}")
                     return None
                 data = await r.json()
                 if "error" in data:
@@ -69,8 +86,11 @@ async def rpc(session: aiohttp.ClientSession, method: str, params,
                     return None
                 return data.get("result")
         except Exception as e:
-            print(f"    [EXC attempt {attempt}] {label or method}: {e}")
-            await asyncio.sleep(2 ** attempt)
+            wait = min(2 ** (attempt // len(ARCHIVE_RPCS)), 10)
+            print(f"    [EXC] {label or method}: {e} — жду {wait}с")
+            await asyncio.sleep(wait)
+            if use_chain:
+                _rpc_idx += 1
     return None
 
 
@@ -79,29 +99,25 @@ async def get_sigs(session, address: str, limit: int = 1000) -> list:
     await asyncio.sleep(0.5)
     r = await rpc(session, "getSignaturesForAddress",
                   [address, {"limit": limit, "commitment": "confirmed"}],
-                  label=f"getSigs({address[:8]})",
-                  url=RPC_URL_PUBLIC)
+                  label=f"getSigs({address[:8]})")  # цепочка RPC
     return r or []
 
 
 async def get_tx(session, sig: str) -> Optional[dict]:
-    """Fetch via Ankr archive RPC — stores logMessages for old transactions."""
     return await rpc(session, "getTransaction",
                      [sig, {"encoding": "jsonParsed", "commitment": "confirmed",
                             "maxSupportedTransactionVersion": 0}],
-                     label=f"getTx({sig[:8]})",
-                     url=RPC_URL_PUBLIC)
+                     label=f"getTx({sig[:8]})")  # цепочка RPC
 
 
 async def get_largest(session, mint: str) -> list:
     r = await rpc(session, "getTokenLargestAccounts",
-                  [mint, {"commitment": "confirmed"}], label="getLargest",
-                  url=RPC_URL_PUBLIC)
+                  [mint, {"commitment": "confirmed"}], label="getLargest")  # цепочка
     return (r or {}).get("value") or []
 
 
 async def get_asset(session, mint: str) -> Optional[dict]:
-    # DAS method — only available on Helius, not public RPC
+    # DAS — только Helius, публичных нод нет
     return await rpc(session, "getAsset", {"id": mint}, label="getAsset",
                      url=RPC_URL_HELIUS)
 
