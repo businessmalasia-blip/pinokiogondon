@@ -19,10 +19,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "")
-# Use public Solana RPC for heavy lifting (signatures, transactions, holders)
-# so the analysis script doesn't compete with the running bot on the Helius key.
-# Helius is only used for DAS-only methods (getAsset).
-RPC_URL_PUBLIC = "https://api.mainnet-beta.solana.com"
+# Ankr — бесплатный архивный RPC, хранит logMessages для старых транзакций,
+# не требует ключа, ~30 req/sec. Не конкурирует с ботом (бот использует Helius).
+RPC_URL_PUBLIC = "https://rpc.ankr.com/solana"
 RPC_URL_HELIUS = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 PUMP_PROGRAM   = os.getenv("PUMP_PROGRAM", "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P")
 SOL_PRICE_FALLBACK = 150.0
@@ -86,19 +85,18 @@ async def get_sigs(session, address: str, limit: int = 1000) -> list:
 
 
 async def get_tx(session, sig: str) -> Optional[dict]:
-    """Fetch one transaction via Helius (archive node — stores logMessages for old tx).
-    Public RPC strips logMessages for transactions older than ~2 weeks."""
+    """Fetch via Ankr archive RPC — stores logMessages for old transactions."""
     return await rpc(session, "getTransaction",
                      [sig, {"encoding": "jsonParsed", "commitment": "confirmed",
                             "maxSupportedTransactionVersion": 0}],
                      label=f"getTx({sig[:8]})",
-                     url=RPC_URL_HELIUS)
+                     url=RPC_URL_PUBLIC)
 
 
 async def get_largest(session, mint: str) -> list:
     r = await rpc(session, "getTokenLargestAccounts",
                   [mint, {"commitment": "confirmed"}], label="getLargest",
-                  url=RPC_URL_HELIUS)
+                  url=RPC_URL_PUBLIC)
     return (r or {}).get("value") or []
 
 
