@@ -646,10 +646,37 @@ async def analyze_token(
         await ctx.stats.record_filter_result(mint, "score")
         return
 
+    # Alpha buyer bonus (после MIN_SCORE — не помогает провальным токенам пройти)
+    alpha_bonus = 0.0
+    try:
+        from .pump import fee_payer as _fee_payer
+        oldest_sigs = [
+            sig["signature"]
+            for sig in list(reversed(mint_signatures))[:10]
+            if not sig.get("err") and sig.get("signature")
+        ]
+        if oldest_sigs:
+            first_txs = await ctx.helius.get_transactions_batch(oldest_sigs)
+            for tx in first_txs:
+                if not tx:
+                    continue
+                fp = _fee_payer(tx)
+                if fp and await ctx.redis.sismember("alpha_wallets", fp):
+                    log.info(
+                        "[%s] ALPHA_BUYER: %s найден среди первых покупателей, бонус +1.0",
+                        mint, fp,
+                    )
+                    alpha_bonus = 1.0
+                    break
+    except Exception:
+        log.exception("[%s] ALPHA_BUYER: ошибка проверки", mint)
+
     # Все фильтры и скоринг пройдены
     log.info(
-        "[%s] 🎯 ВСЕ ФИЛЬТРЫ ПРОЙДЕНЫ (score %.1f) — жду капу $%.0f–$%.0f",
-        mint, score["total"], s.alert_mc_min, s.alert_mc_max,
+        "[%s] 🎯 ВСЕ ФИЛЬТРЫ ПРОЙДЕНЫ (score %.1f%s) — жду капу $%.0f–$%.0f",
+        mint, score["total"],
+        f" +{alpha_bonus:.1f} alpha" if alpha_bonus else "",
+        s.alert_mc_min, s.alert_mc_max,
     )
     await ctx.stats.record_filter_result(mint, "passed")
 
@@ -714,6 +741,43 @@ async def wait_and_alert(
             log.info("[%s] алерт пропущен: уже отправляли недавно", mint)
             return
 
+        # Сохраняем первых 10 покупателей для системы репутации
+        try:
+            from .pump import fee_payer as _fee_payer
+            bc_sigs = await ctx.helius.get_signatures(bonding_curve, limit=15)
+            oldest_sigs = [
+                s["signature"]
+                for s in reversed(bc_sigs)
+                if not s.get("err") and s.get("signature")
+            ][:10]
+            if oldest_sigs:
+                first_txs = await ctx.helius.get_transactions_batch(oldest_sigs)
+                first_buyers: list[str] = []
+                seen_buyers: set[str] = set()
+                for tx in first_txs:
+                    if not tx:
+                        continue
+                    fp = _fee_payer(tx)
+                    if fp and fp not in seen_buyers:
+                        seen_buyers.add(fp)
+                        first_buyers.append(fp)
+                if first_buyers:
+                    await ctx.redis.set(
+                        f"pending_alpha:{mint}",
+                        json.dumps({
+                            "mc": final_mc,
+                            "bonding_curve": bonding_curve,
+                            "buyers": first_buyers,
+                        }),
+                        ex=3600,
+                    )
+                    log.info(
+                        "[%s] ALPHA: сохранено %d первых покупателей (MC $%.0f)",
+                        mint, len(first_buyers), final_mc,
+                    )
+        except Exception:
+            log.exception("[%s] ALPHA: ошибка сохранения первых покупателей", mint)
+
         # Имя/тикер/картинка кэшированы на этапе анализа (getAsset не повторяем)
         name = alert_data.get("name", "Unknown")
         symbol = alert_data.get("symbol", "?")
@@ -740,6 +804,44 @@ async def wait_and_alert(
         await ctx.stats.record_alert(mint, name, symbol, final_mc, price)
     finally:
         await ctx.redis.delete(f"pending_alert:{mint}")
+
+
+async def alpha_reputation_loop(ctx: Context) -> None:
+    """Каждые 5 минут проверяет токены из pending_alpha:*.
+    Если капа выросла ≥2x от капы алерта — добавляет первых покупателей в alpha_wallets."""
+    while True:
+        await asyncio.sleep(300)
+        try:
+            async for key in ctx.redis.scan_iter("pending_alpha:*"):
+                raw = await ctx.redis.get(key)
+                if not raw:
+                    continue
+                try:
+                    data = json.loads(raw)
+                    mint = key.split(":", 1)[1]
+                except (json.JSONDecodeError, IndexError):
+                    await ctx.redis.delete(key)
+                    continue
+                alert_mc = data.get("mc", 0)
+                bonding_curve = data.get("bonding_curve", "")
+                buyers = data.get("buyers", [])
+                if not bonding_curve or not buyers or not alert_mc:
+                    await ctx.redis.delete(key)
+                    continue
+                current_mc = await market_cap(ctx, bonding_curve)
+                if current_mc and current_mc >= alert_mc * 2:
+                    for addr in buyers:
+                        await ctx.redis.sadd("alpha_wallets", addr)
+                    await ctx.redis.expire("alpha_wallets", 2592000)
+                    log.info(
+                        "[%s] ALPHA: 2x MC ($%.0f → $%.0f) — %d покупателей добавлены в alpha_wallets",
+                        mint, alert_mc, current_mc, len(buyers),
+                    )
+                    await ctx.redis.delete(key)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("alpha_reputation_loop error")
 
 
 async def resume_pending_alerts(ctx: Context) -> None:
@@ -1069,6 +1171,7 @@ async def run() -> None:
             asyncio.create_task(pump_logs_loop(ctx)),
             asyncio.create_task(outcomes_loop(ctx)),
             asyncio.create_task(heartbeat_loop(ctx)),
+            asyncio.create_task(alpha_reputation_loop(ctx)),
             asyncio.create_task(
                 dispatcher.start_polling(tg_bot, handle_signals=False)
             ),
