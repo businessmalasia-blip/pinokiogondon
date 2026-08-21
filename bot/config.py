@@ -90,6 +90,7 @@ class Settings:
 
     # Публичный Solana RPC для стандартных методов (без кредитов Helius)
     public_rpc_url: str
+    public_rate_limit: float
 
     # WebSocket (отдельный URL — не Helius, чтобы не тратить streaming-кредиты)
     ws_rpc_url: str
@@ -197,8 +198,9 @@ def load_settings() -> Settings:
         das_retries=int(os.getenv("DAS_RETRIES", "1")),
         public_rpc_url=os.getenv(
             "PUBLIC_RPC_URL",
-            "https://api.mainnet-beta.solana.com",
+            "https://rpc.ankr.com/solana",
         ),
+        public_rate_limit=float(os.getenv("PUBLIC_RATE_LIMIT", "0.1")),
         ws_rpc_url=os.getenv(
             "WS_RPC_URL",
             "wss://api.mainnet-beta.solana.com",

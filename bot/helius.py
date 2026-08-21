@@ -26,13 +26,17 @@ class HeliusClient:
         rpc_url: str,           # Helius — только для DAS (getAsset)
         public_rpc_url: str,    # Публичный Solana RPC — для стандартных методов
         rate_limit: float,
+        public_rate_limit: float = 0.1,  # 10 req/sec для публичного RPC
     ) -> None:
         self._session = session
         self._rpc_url = rpc_url
         self._public_url = public_rpc_url
         self._rate_limit = rate_limit
+        self._public_rate_limit = public_rate_limit
         self._lock = asyncio.Lock()
         self._last_request_at = 0.0
+        self._pub_lock = asyncio.Lock()
+        self._pub_last_request_at = 0.0
         self._id_counter = itertools.count(1)
         # Скользящее окно 24ч для подсчёта кредитов Helius (только DAS-вызовы)
         self._call_timestamps: deque = deque()
@@ -102,11 +106,21 @@ class HeliusClient:
             return data.get("result")
         return None
 
-    # ----- Публичный Solana RPC (без кредитов Helius, без rate limiting) -----
+    async def _pub_throttle(self) -> None:
+        """Пауза между запросами к публичному RPC."""
+        async with self._pub_lock:
+            now = time.monotonic()
+            wait = self._pub_last_request_at + self._public_rate_limit - now
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._pub_last_request_at = time.monotonic()
+
+    # ----- Публичный Solana RPC (без кредитов Helius, со своим rate limiting) -----
 
     async def _pub_request(self, method: str, params: Any) -> Any:
         """Запрос к публичному Solana RPC — не расходует кредиты Helius."""
         for attempt in range(2):
+            await self._pub_throttle()
             payload = {
                 "jsonrpc": "2.0",
                 "id": next(self._id_counter),
@@ -146,6 +160,7 @@ class HeliusClient:
             for i, (method, params) in enumerate(requests)
         ]
         for attempt in range(2):
+            await self._pub_throttle()
             try:
                 async with self._session.post(
                     self._public_url,
