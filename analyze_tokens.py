@@ -1,9 +1,8 @@
 """
-Автономный анализ исторических токенов Pump.fun.
+Анализ исторических токенов Pump.fun.
 Запуск: python analyze_tokens.py
 
-Собирает метрики по каждому токену на момент первого входа капы в диапазон $9k-$12k.
-Требует HELIUS_API_KEY и PUMP_PROGRAM в .env (те же, что у бота).
+Данные берутся по адресу bonding curve (там вся активность).
 """
 
 import asyncio
@@ -20,8 +19,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "")
-RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
-PUMP_PROGRAM = os.getenv("PUMP_PROGRAM", "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P")
+RPC_URL        = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
+PUMP_PROGRAM   = os.getenv("PUMP_PROGRAM", "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P")
+SOL_PRICE_FALLBACK = 150.0
 
 TARGET_MINTS = [
     "GWNYjjSPsE6PthXjc61JQrTcjfNerSrRzBakeinqpump",
@@ -31,502 +31,464 @@ TARGET_MINTS = [
     "6dAfB8QVc43KZJySaLRiCVCZ27QpZvEzvARw5PM9pump",
 ]
 
-MC_LOW   = 9_000
-MC_HIGH  = 12_000
-TOKEN_SUPPLY = 1_000_000_000  # 1B tokens (Pump.fun standard)
-BONDING_EXCLUDE_PCT = 50.0
+MC_LOW             = 9_000
+MC_HIGH            = 12_000
+TOKEN_SUPPLY       = 1_000_000_000
+BONDING_EXCLUDE    = 50.0
 BUNDLE_SLOT_WINDOW = 2
-
-TRADE_EVENT_DISCRIMINATOR = bytes([228, 69, 165, 46, 81, 203, 154, 29])
+TRADE_DISC         = bytes([228, 69, 165, 46, 81, 203, 154, 29])
 
 _req_id = 0
-
-def _next_id():
-    global _req_id
-    _req_id += 1
-    return _req_id
+def _nid():
+    global _req_id; _req_id += 1; return _req_id
 
 
-async def rpc(session: aiohttp.ClientSession, method: str, params) -> Optional[dict]:
-    payload = {"jsonrpc": "2.0", "id": _next_id(), "method": method, "params": params}
+# ── RPC ─────────────────────────────────────────────────────────────────────
+
+async def rpc(session: aiohttp.ClientSession, method: str, params, label="") -> Optional[object]:
+    payload = {"jsonrpc": "2.0", "id": _nid(), "method": method, "params": params}
     for attempt in range(3):
         try:
-            async with session.post(RPC_URL, json=payload, timeout=aiohttp.ClientTimeout(total=30)) as r:
+            async with session.post(RPC_URL, json=payload,
+                                    timeout=aiohttp.ClientTimeout(total=30)) as r:
                 if r.status == 429:
-                    await asyncio.sleep(1)
+                    wait = 2 ** attempt
+                    print(f"    [429] {label or method} — жду {wait}с")
+                    await asyncio.sleep(wait)
                     continue
+                if r.status != 200:
+                    print(f"    [HTTP {r.status}] {label or method}")
+                    return None
                 data = await r.json()
                 if "error" in data:
+                    print(f"    [RPC ERR] {label or method}: {data['error']}")
                     return None
                 return data.get("result")
-        except Exception:
+        except Exception as e:
+            print(f"    [EXC attempt {attempt}] {label or method}: {e}")
             await asyncio.sleep(1)
     return None
 
 
-async def get_signatures(session, address: str, limit: int = 1000) -> list:
-    result = await rpc(session, "getSignaturesForAddress",
-                       [address, {"limit": limit, "commitment": "confirmed"}])
-    return result or []
+async def get_sigs(session, address: str, limit: int = 1000) -> list:
+    r = await rpc(session, "getSignaturesForAddress",
+                  [address, {"limit": limit, "commitment": "confirmed"}],
+                  label=f"getSigs({address[:8]})")
+    return r or []
 
 
-async def get_transaction(session, sig: str) -> Optional[dict]:
+async def get_tx(session, sig: str) -> Optional[dict]:
     return await rpc(session, "getTransaction",
                      [sig, {"encoding": "jsonParsed", "commitment": "confirmed",
-                            "maxSupportedTransactionVersion": 0}])
+                            "maxSupportedTransactionVersion": 0}],
+                     label=f"getTx({sig[:8]})")
 
 
-async def get_token_largest_accounts(session, mint: str) -> list:
-    result = await rpc(session, "getTokenLargestAccounts",
-                       [mint, {"commitment": "confirmed"}])
-    if not result:
-        return []
-    return result.get("value") or []
+async def get_largest(session, mint: str) -> list:
+    r = await rpc(session, "getTokenLargestAccounts",
+                  [mint, {"commitment": "confirmed"}], label="getLargest")
+    return (r or {}).get("value") or []
 
 
-async def get_account_info(session, address: str) -> Optional[dict]:
-    result = await rpc(session, "getAccountInfo",
-                       [address, {"encoding": "base64", "commitment": "confirmed"}])
-    if not result:
-        return None
-    return result.get("value")
-
-
-async def get_multiple_accounts(session, addresses: list) -> list:
-    result = await rpc(session, "getMultipleAccounts",
-                       [addresses, {"encoding": "jsonParsed", "commitment": "confirmed"}])
-    if not result:
-        return [None] * len(addresses)
-    return result.get("value") or [None] * len(addresses)
-
-
-def parse_bonding_curve(data_b64: str) -> Optional[dict]:
-    try:
-        raw = base64.b64decode(data_b64)
-        if len(raw) < 49:
-            return None
-        offset = 8
-        vt = struct.unpack_from("<Q", raw, offset)[0]
-        vs = struct.unpack_from("<Q", raw, offset + 8)[0]
-        rt = struct.unpack_from("<Q", raw, offset + 16)[0]
-        rs = struct.unpack_from("<Q", raw, offset + 24)[0]
-        return {"virtual_token_reserves": vt, "virtual_sol_reserves": vs,
-                "real_token_reserves": rt, "real_sol_reserves": rs}
-    except Exception:
-        return None
-
-
-def calc_mc(reserves: dict, sol_price: float) -> Optional[float]:
-    vt = reserves["virtual_token_reserves"]
-    vs = reserves["virtual_sol_reserves"]
-    if vt <= 0:
-        return None
-    price_sol = (vs / 1e9) / (vt / 1e6)
-    return price_sol * TOKEN_SUPPLY * sol_price
-
-
-def parse_trade_event(log_line: str) -> Optional[dict]:
-    if not log_line.startswith("Program data: "):
-        return None
-    try:
-        raw = base64.b64decode(log_line[len("Program data: "):])
-    except Exception:
-        return None
-    if len(raw) < 8 or raw[:8] != TRADE_EVENT_DISCRIMINATOR:
-        return None
-    try:
-        offset = 8
-        mint_bytes = raw[offset: offset + 32]
-        offset += 32
-        sol_amount = struct.unpack_from("<Q", raw, offset)[0]; offset += 8
-        token_amount = struct.unpack_from("<Q", raw, offset)[0]; offset += 8
-        is_buy = bool(raw[offset]); offset += 1
-        user_bytes = raw[offset: offset + 32]
-        offset += 32
-        timestamp = struct.unpack_from("<q", raw, offset)[0]; offset += 8
-        vs_new = struct.unpack_from("<Q", raw, offset)[0]; offset += 8
-        vt_new = struct.unpack_from("<Q", raw, offset)[0]
-        return {
-            "sol_amount": sol_amount,
-            "token_amount": token_amount,
-            "is_buy": is_buy,
-            "virtual_sol_reserves": vs_new,
-            "virtual_token_reserves": vt_new,
-        }
-    except Exception:
-        return None
-
-
-def fee_payer(tx: dict) -> Optional[str]:
-    keys = tx.get("transaction", {}).get("message", {}).get("accountKeys", [])
-    if not keys:
-        return None
-    first = keys[0]
-    if isinstance(first, dict):
-        return first.get("pubkey")
-    return first
+async def get_asset(session, mint: str) -> Optional[dict]:
+    return await rpc(session, "getAsset", {"id": mint}, label="getAsset")
 
 
 async def get_sol_price(session: aiohttp.ClientSession) -> float:
     try:
         async with session.get(
             "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd",
-            timeout=aiohttp.ClientTimeout(total=10),
-        ) as r:
-            data = await r.json()
-            return float(data["solana"]["usd"])
+            timeout=aiohttp.ClientTimeout(total=10)) as r:
+            d = await r.json()
+            return float(d["solana"]["usd"])
     except Exception:
-        return 150.0  # fallback
+        print(f"  CoinGecko недоступен, используем fallback ${SOL_PRICE_FALLBACK}")
+        return SOL_PRICE_FALLBACK
 
 
-@dataclass
-class TokenMetrics:
-    mint: str
-    age_minutes: Optional[float] = None
-    last_tx_seconds_ago: Optional[float] = None
-    max_holder_pct: Optional[float] = None
-    top10_pct: Optional[float] = None
-    bundle_pct: Optional[float] = None
-    dev_status: str = "Unknown"
-    dev_msr_hint: str = "n/a"
-    volume_5m_usd: float = 0.0
-    unique_buyers_5m: int = 0
-    entry_mc: Optional[float] = None
-    entry_time: Optional[int] = None
-    notes: list = field(default_factory=list)
+# ── Derive bonding curve PDA ─────────────────────────────────────────────────
 
-
-async def derive_bonding_curve_address(mint: str) -> Optional[str]:
-    """Derive bonding curve PDA from mint using Pump.fun seeds."""
+def derive_bonding_curve(mint: str) -> Optional[str]:
     try:
         from solders.pubkey import Pubkey
-        from solders.pubkey import Pubkey as SoldersKey
-
-        mint_key = Pubkey.from_string(mint)
+        mint_key    = Pubkey.from_string(mint)
         program_key = Pubkey.from_string(PUMP_PROGRAM)
         seeds = [b"bonding-curve", bytes(mint_key)]
         pda, _ = Pubkey.find_program_address(seeds, program_key)
         return str(pda)
     except Exception as e:
+        print(f"  PDA derive error: {e}")
         return None
 
 
-async def analyze_mint(session: aiohttp.ClientSession, mint: str, sol_price: float) -> TokenMetrics:
-    m = TokenMetrics(mint=mint)
-    print(f"\n[{mint[:8]}...] Получаю сигнатуры минта...")
+# ── Parsers ──────────────────────────────────────────────────────────────────
 
-    # 1. Получаем транзакции минта (для age, activity, bundles, volume)
-    mint_sigs = await get_signatures(session, mint, limit=1000)
-    if not mint_sigs:
-        m.notes.append("нет сигнатур")
+def parse_trade(log_line: str) -> Optional[dict]:
+    if not log_line.startswith("Program data: "):
+        return None
+    try:
+        raw = base64.b64decode(log_line[14:])
+    except Exception:
+        return None
+    if len(raw) < 8 or raw[:8] != TRADE_DISC:
+        return None
+    try:
+        o = 8
+        o += 32  # mint
+        sol_amt   = struct.unpack_from("<Q", raw, o)[0]; o += 8
+        tok_amt   = struct.unpack_from("<Q", raw, o)[0]; o += 8
+        is_buy    = bool(raw[o]);                        o += 1
+        o += 32  # user
+        o += 8   # timestamp
+        vs = struct.unpack_from("<Q", raw, o)[0]; o += 8
+        vt = struct.unpack_from("<Q", raw, o)[0]
+        return {"sol_amt": sol_amt, "tok_amt": tok_amt,
+                "is_buy": is_buy, "vs": vs, "vt": vt}
+    except Exception:
+        return None
+
+
+def mc_from_reserves(vs: int, vt: int, sol_price: float) -> Optional[float]:
+    if vt <= 0:
+        return None
+    price_sol = (vs / 1e9) / (vt / 1e6)
+    return price_sol * TOKEN_SUPPLY * sol_price
+
+
+def fee_payer(tx: dict) -> Optional[str]:
+    keys = tx.get("transaction", {}).get("message", {}).get("accountKeys", [])
+    if not keys:
+        return None
+    f = keys[0]
+    return f.get("pubkey") if isinstance(f, dict) else f
+
+
+# ── Main analysis ─────────────────────────────────────────────────────────────
+
+@dataclass
+class Metrics:
+    mint:               str
+    bonding_curve:      Optional[str]  = None
+    entry_mc:           Optional[float] = None
+    age_minutes:        Optional[float] = None
+    last_tx_sec:        Optional[float] = None
+    max_holder_pct:     Optional[float] = None
+    top10_pct:          Optional[float] = None
+    bundle_pct:         Optional[float] = None
+    vol_5m:             float           = 0.0
+    buyers_5m:          int             = 0
+    sell_ratio:         Optional[float] = None
+    dev_addr:           Optional[str]   = None
+    dev_status:         str             = "—"
+    has_social:         bool            = False
+    name:               str             = "—"
+    symbol:             str             = "—"
+    notes:              list            = field(default_factory=list)
+
+
+async def analyze(session: aiohttp.ClientSession, mint: str, sol_price: float) -> Metrics:
+    m = Metrics(mint=mint)
+    short = mint[:8]
+    print(f"\n  [{short}] Деривирую bonding curve...")
+
+    bc = derive_bonding_curve(mint)
+    m.bonding_curve = bc
+    if not bc:
+        m.notes.append("не удалось деривировать bonding curve")
         return m
+    print(f"  [{short}] Bonding curve: {bc[:12]}...")
 
-    # Возраст токена
+    # ── Metadata (DAS) ───────────────────────────────────────────────────────
+    asset = await get_asset(session, mint)
+    await asyncio.sleep(0.35)
+    if asset:
+        m.name   = asset.get("content", {}).get("metadata", {}).get("name",   "—")
+        m.symbol = asset.get("content", {}).get("metadata", {}).get("symbol", "—")
+        links    = asset.get("links") or {}
+        m.has_social = bool(links.get("twitter") or links.get("website") or links.get("telegram"))
+        print(f"  [{short}] Токен: {m.name} ({m.symbol}), соцсети: {m.has_social}")
+    else:
+        print(f"  [{short}] getAsset вернул None")
+
+    # ── Сигнатуры с bonding curve (основная активность) ─────────────────────
+    print(f"  [{short}] Запрашиваю сигнатуры bonding curve (limit=1000)...")
+    bc_sigs = await get_sigs(session, bc, limit=1000)
+    await asyncio.sleep(0.35)
+    print(f"  [{short}] Сигнатур bonding curve: {len(bc_sigs)}")
+
+    if not bc_sigs:
+        # Пробуем mint напрямую (иногда там есть creation tx)
+        print(f"  [{short}] Пробую mint напрямую...")
+        mint_sigs = await get_sigs(session, mint, limit=100)
+        await asyncio.sleep(0.35)
+        print(f"  [{short}] Сигнатур mint: {len(mint_sigs)}")
+        if not mint_sigs:
+            m.notes.append("нет данных ни по bonding curve, ни по mint (токен слишком старый?)")
+            return m
+        bc_sigs = mint_sigs
+
     now = time.time()
-    oldest_sig = next((s for s in reversed(mint_sigs) if s.get("blockTime")), None)
-    newest_sig = next((s for s in mint_sigs if s.get("blockTime")), None)
+    chron = list(reversed(bc_sigs))  # старые → новые
+    creation_slot = chron[0].get("slot") if chron else None
 
-    if oldest_sig:
-        creation_time = oldest_sig["blockTime"]
-        if newest_sig:
-            m.last_tx_seconds_ago = now - newest_sig["blockTime"]
+    oldest_time = next((s["blockTime"] for s in chron if s.get("blockTime")), None)
+    newest_time = next((s["blockTime"] for s in reversed(chron) if s.get("blockTime")), None)
+    if newest_time:
+        m.last_tx_sec = now - newest_time
 
-    # 2. Ищем момент входа капы в диапазон
-    # Читаем транзакции от самых старых, ищем первый трейд где MC вошёл в диапазон
-    print(f"[{mint[:8]}...] Ищу момент входа в $9k-$12k (анализирую {len(mint_sigs)} tx)...")
+    # ── Читаем транзакции для поиска entry point, volume, buy/sell ───────────
+    print(f"  [{short}] Читаю транзакции (max 300)...")
+    valid_sigs = [s["signature"] for s in chron if s.get("signature") and not s.get("err")]
 
-    entry_tx_time = None
-    entry_mc_val = None
-    volume_5m_trades: list = []  # (timestamp, sol_amount, buyer)
-    buyers_5m: set = set()
-    creation_slot = None
+    entry_time  = None
+    all_trades  = []   # (block_time, sol_usd, is_buy, fee_payer_addr)
+    buy_count   = 0
+    sell_count  = 0
 
-    # Берём batch старых транзакций (до 50) для поиска entry point
-    # Идём от старых к новым
-    sigs_chronological = list(reversed(mint_sigs))
-    if sigs_chronological:
-        creation_slot = sigs_chronological[0].get("slot")
-
-    # Для поиска entry point нужно читать логи транзакций
-    # Читаем пачками по 20
-    BATCH = 20
-    sig_list = [s["signature"] for s in sigs_chronological if s.get("signature") and not s.get("err")]
-
-    entry_found = False
-    for i in range(0, min(len(sig_list), 200), BATCH):
-        batch_sigs = sig_list[i: i + BATCH]
-        # Sequential requests with slight delay to avoid 429
-        txs = []
-        for sig in batch_sigs:
-            tx = await get_transaction(session, sig)
-            txs.append(tx)
-            await asyncio.sleep(0.15)
-
-        for tx in txs:
+    BATCH = 15
+    for i in range(0, min(len(valid_sigs), 300), BATCH):
+        batch = valid_sigs[i:i + BATCH]
+        for sig in batch:
+            tx = await get_tx(session, sig)
+            await asyncio.sleep(0.12)
             if not tx:
                 continue
             tx_time = tx.get("blockTime")
-            if not tx_time:
-                continue
-            logs = (tx.get("meta") or {}).get("logMessages") or []
+            fp      = fee_payer(tx)
+            logs    = (tx.get("meta") or {}).get("logMessages") or []
             for line in logs:
-                ev = parse_trade_event(line)
+                ev = parse_trade(line)
                 if not ev:
                     continue
-                vt = ev["virtual_token_reserves"]
-                vs = ev["virtual_sol_reserves"]
-                if vt <= 0:
-                    continue
-                price_sol = (vs / 1e9) / (vt / 1e6)
-                mc = price_sol * TOKEN_SUPPLY * sol_price
+                mc = mc_from_reserves(ev["vs"], ev["vt"], sol_price)
+                usd = ev["sol_amt"] / 1e9 * sol_price
+                if ev["is_buy"]:
+                    buy_count += 1
+                else:
+                    sell_count += 1
+                if tx_time and fp:
+                    all_trades.append((tx_time, usd, ev["is_buy"], fp))
 
-                # Накапливаем volume / buyers за 5 мин до entry
-                fp = fee_payer(tx)
-                if ev["is_buy"] and fp:
-                    volume_5m_trades.append((tx_time, ev["sol_amount"] / 1e9 * sol_price, fp))
+                # Первый вход в диапазон
+                if entry_time is None and mc and MC_LOW <= mc <= MC_HIGH:
+                    entry_time   = tx_time
+                    m.entry_mc   = mc
+                    if oldest_time and tx_time:
+                        m.age_minutes = (tx_time - oldest_time) / 60
+                    print(f"  [{short}] ✅ Entry MC ${mc:,.0f} "
+                          f"(возраст {m.age_minutes:.1f} мин)" if m.age_minutes else
+                          f"  [{short}] ✅ Entry MC ${mc:,.0f}")
 
-                if not entry_found and MC_LOW <= mc <= MC_HIGH:
-                    entry_found = True
-                    entry_tx_time = tx_time
-                    entry_mc_val = mc
-                    m.entry_mc = mc
-                    m.entry_time = tx_time
-                    if oldest_sig and oldest_sig.get("blockTime"):
-                        m.age_minutes = (tx_time - oldest_sig["blockTime"]) / 60
-                    print(f"[{mint[:8]}...] ✅ Entry MC: ${mc:,.0f} at t={tx_time}")
-                    break
-            if entry_found:
-                break
+        if entry_time and i >= 60:
+            break  # entry найден, достаточно данных для volume
 
-    if entry_tx_time:
-        # Volume и buyers за 5 мин до entry
-        cutoff_5m = entry_tx_time - 300
-        for ts, usd, buyer in volume_5m_trades:
-            if cutoff_5m <= ts <= entry_tx_time:
-                m.volume_5m_usd += usd
-                buyers_5m.add(buyer)
-        m.unique_buyers_5m = len(buyers_5m)
-    else:
-        m.notes.append("entry MC не найден в первых 200 tx")
-        # Считаем volume за последние 5 мин в любом случае
-        cutoff_5m = now - 300
-        for ts, usd, buyer in volume_5m_trades:
-            if ts >= cutoff_5m:
-                m.volume_5m_usd += usd
-                buyers_5m.add(buyer)
-        m.unique_buyers_5m = len(buyers_5m)
+    # ── Volume и buyers за 5 мин до entry ───────────────────────────────────
+    ref_time = entry_time or newest_time or now
+    cutoff   = ref_time - 300
+    window_trades = [(ts, usd, buy, fp) for ts, usd, buy, fp in all_trades
+                     if cutoff <= ts <= ref_time]
+    m.vol_5m   = sum(usd for _, usd, buy, _ in window_trades if buy)
+    m.buyers_5m = len({fp for _, _, buy, fp in window_trades if buy})
 
-    # 3. Bundles (покупки в первых BUNDLE_SLOT_WINDOW слотах)
-    if creation_slot and mint_sigs:
-        bundle_count = sum(
-            1 for s in sigs_chronological
-            if s.get("slot") and not s.get("err")
-            and s["slot"] <= creation_slot + BUNDLE_SLOT_WINDOW
-        )
-        total_valid = sum(1 for s in sigs_chronological if not s.get("err"))
+    # ── Buy/sell ratio (по всем транзакциям) ────────────────────────────────
+    total_trades = buy_count + sell_count
+    if total_trades > 0:
+        m.sell_ratio = sell_count / total_trades * 100
+
+    # ── Бандлы ──────────────────────────────────────────────────────────────
+    if creation_slot:
+        bundle_tx   = sum(1 for s in chron
+                          if s.get("slot") and not s.get("err")
+                          and s["slot"] <= creation_slot + BUNDLE_SLOT_WINDOW)
+        total_valid = sum(1 for s in chron if not s.get("err"))
         if total_valid > 0:
-            m.bundle_pct = bundle_count / total_valid * 100
+            m.bundle_pct = bundle_tx / total_valid * 100
 
-    # 4. Холдеры — концентрация
-    print(f"[{mint[:8]}...] Читаю холдеров...")
-    holders = await get_token_largest_accounts(session, mint)
-    await asyncio.sleep(0.3)
-
+    # ── Холдеры ──────────────────────────────────────────────────────────────
+    print(f"  [{short}] Читаю холдеров...")
+    holders = await get_largest(session, mint)
+    await asyncio.sleep(0.35)
     if holders:
-        total_supply_ui = TOKEN_SUPPLY
         shares = []
-        bonding_curve_addr = await derive_bonding_curve_address(mint)
-
         for h in holders:
-            amount_str = h.get("uiAmountString") or str(h.get("uiAmount", 0))
             try:
-                amount = float(amount_str)
+                amt = float(h.get("uiAmountString") or h.get("uiAmount") or 0)
             except Exception:
-                amount = 0.0
-            pct = amount / total_supply_ui * 100 if total_supply_ui > 0 else 0
-            addr = h.get("address", "")
-            if bonding_curve_addr and addr == bonding_curve_addr:
-                continue  # исключаем bonding curve
-            if pct >= BONDING_EXCLUDE_PCT:
+                amt = 0.0
+            pct = amt / TOKEN_SUPPLY * 100
+            if pct >= BONDING_EXCLUDE:
                 continue
             shares.append(pct)
-
         if shares:
             m.max_holder_pct = shares[0]
-            m.top10_pct = sum(shares[:10])
+            m.top10_pct      = sum(shares[:10])
 
-    # 5. Дев — первая транзакция = creator
-    if sigs_chronological:
-        creation_sig = sigs_chronological[0].get("signature")
-        if creation_sig:
-            print(f"[{mint[:8]}...] Читаю creation tx для дева...")
-            creation_tx = await get_transaction(session, creation_sig)
-            await asyncio.sleep(0.3)
-            if creation_tx:
-                creator = fee_payer(creation_tx)
-                if creator:
-                    # Проверяем историю дева
-                    dev_sigs = await get_signatures(session, creator, limit=50)
-                    await asyncio.sleep(0.3)
-                    if dev_sigs:
-                        # Считаем сколько разных минтов создал
-                        created_mints_hint = min(len(dev_sigs) // 3, 99)
-                        m.dev_status = "Unknown" if created_mints_hint < 3 else "Clean"
-                        m.dev_msr_hint = f"~{len(dev_sigs)} tx (история)"
-                    else:
-                        m.dev_status = "Unknown"
+    # ── Дев (первый fee payer) ────────────────────────────────────────────────
+    creation_sig = chron[0].get("signature") if chron else None
+    if creation_sig:
+        print(f"  [{short}] Читаю creation tx для дева...")
+        creation_tx = await get_tx(session, creation_sig)
+        await asyncio.sleep(0.35)
+        if creation_tx:
+            creator = fee_payer(creation_tx)
+            m.dev_addr = creator
+            if creator:
+                dev_sigs = await get_sigs(session, creator, limit=50)
+                await asyncio.sleep(0.35)
+                if dev_sigs:
+                    m.dev_status = f"Unknown (история: {len(dev_sigs)} tx)"
+                else:
+                    m.dev_status = "Unknown (нет истории)"
 
-    if m.last_tx_seconds_ago is None and newest_sig and newest_sig.get("blockTime"):
-        m.last_tx_seconds_ago = now - newest_sig["blockTime"]
+    if not entry_time:
+        m.notes.append("entry MC не найден в первых 300 tx")
 
     return m
 
 
-def fmt(v, fmt_str=":.1f", default="—"):
+# ── Output ────────────────────────────────────────────────────────────────────
+
+def fmt(v, spec=":.1f", default="—"):
     if v is None:
         return default
-    return format(v, fmt_str.lstrip(":"))
+    try:
+        return format(v, spec.lstrip(":"))
+    except Exception:
+        return str(v)
 
 
-def print_table(results: list[TokenMetrics]):
-    header = (
-        f"{'Mint':>12} | {'AgeMn':>6} | {'LastTx':>6} | "
-        f"{'MaxHld%':>7} | {'Top10%':>6} | {'Bundle%':>7} | "
-        f"{'Vol5m$':>7} | {'Buyers':>6} | {'DevStatus':>10} | "
-        f"{'EntryMC':>8} | Notes"
-    )
-    sep = "-" * len(header)
-    print("\n" + sep)
-    print(header)
-    print(sep)
-    for m in results:
-        short = m.mint[:8] + "…"
+def print_table(results: list[Metrics]):
+    print("\n" + "═" * 110)
+    print(f"{'#':>2}  {'Токен (name/symbol)':>20} | {'AgeMn':>6} | {'LastTx':>7} | "
+          f"{'MaxH%':>5} | {'Top10%':>6} | {'Bndl%':>5} | {'Vol5m$':>7} | "
+          f"{'Buy5m':>5} | {'Sell%':>5} | {'Social':>6} | {'EntryMC':>8} | Notes")
+    print("─" * 110)
+    for i, m in enumerate(results, 1):
+        label = f"{m.symbol}/{m.name[:8]}" if m.symbol != "—" else m.mint[:10]
         print(
-            f"{short:>12} | {fmt(m.age_minutes):>6} | {fmt(m.last_tx_seconds_ago, ':.0f'):>6} | "
-            f"{fmt(m.max_holder_pct):>7} | {fmt(m.top10_pct):>6} | {fmt(m.bundle_pct):>7} | "
-            f"{fmt(m.volume_5m_usd, ':.0f'):>7} | {m.unique_buyers_5m:>6} | {m.dev_status:>10} | "
-            f"{fmt(m.entry_mc, ':.0f'):>8} | {'; '.join(m.notes)}"
+            f"{i:>2}  {label:>20} | "
+            f"{fmt(m.age_minutes):>6} | "
+            f"{fmt(m.last_tx_sec, ':.0f'):>7} | "
+            f"{fmt(m.max_holder_pct):>5} | "
+            f"{fmt(m.top10_pct):>6} | "
+            f"{fmt(m.bundle_pct):>5} | "
+            f"{fmt(m.vol_5m, ':.0f'):>7} | "
+            f"{m.buyers_5m:>5} | "
+            f"{fmt(m.sell_ratio):>5} | "
+            f"{'✅' if m.has_social else '❌':>6} | "
+            f"{fmt(m.entry_mc, ':.0f'):>8} | "
+            f"{'; '.join(m.notes)}"
         )
-    print(sep)
+    print("═" * 110)
 
 
-def stats(values: list) -> tuple:
-    clean = [v for v in values if v is not None]
-    if not clean:
+def stats(vals):
+    c = [v for v in vals if v is not None]
+    if not c:
         return None, None, None, None
-    s = sorted(clean)
-    avg = sum(s) / len(s)
-    med = s[len(s) // 2]
-    return avg, med, s[0], s[-1]
+    s = sorted(c)
+    return sum(s)/len(s), s[len(s)//2], s[0], s[-1]
 
 
-def print_stats(results: list[TokenMetrics]):
-    print("\n\n=== СТАТИСТИКА ПО 5 ТОКЕНАМ ===\n")
-    metrics = {
-        "Возраст (мин)":       [r.age_minutes for r in results],
-        "Последняя tx (сек)":  [r.last_tx_seconds_ago for r in results],
-        "Макс. холдер (%)":    [r.max_holder_pct for r in results],
-        "Топ-10 (%)":          [r.top10_pct for r in results],
-        "Бандлы (%)":          [r.bundle_pct for r in results],
-        "Volume 5м ($)":       [r.volume_5m_usd for r in results],
-        "Buyers 5м":           [r.unique_buyers_5m for r in results],
+def print_stats(results: list[Metrics]):
+    print("\n\n=== СТАТИСТИКА ===\n")
+    metrics_map = {
+        "Возраст (мин)":      [r.age_minutes      for r in results],
+        "Последняя tx (сек)": [r.last_tx_sec      for r in results],
+        "Макс. холдер (%)":   [r.max_holder_pct   for r in results],
+        "Топ-10 (%)":         [r.top10_pct        for r in results],
+        "Бандлы (%)":         [r.bundle_pct       for r in results],
+        "Volume 5м ($)":      [r.vol_5m           for r in results],
+        "Buyers 5м":          [float(r.buyers_5m) for r in results],
+        "Sell ratio (%)":     [r.sell_ratio       for r in results],
     }
     print(f"{'Метрика':>22} | {'Среднее':>9} | {'Медиана':>9} | {'Мин':>9} | {'Макс':>9}")
-    print("-" * 75)
-    for name, vals in metrics.items():
+    print("-" * 70)
+    for name, vals in metrics_map.items():
         avg, med, mn, mx = stats(vals)
-        def f(v): return f"{v:.1f}" if v is not None else "—"
+        f = lambda v: f"{v:.1f}" if v is not None else "—"
         print(f"{name:>22} | {f(avg):>9} | {f(med):>9} | {f(mn):>9} | {f(mx):>9}")
 
+    soc = sum(1 for r in results if r.has_social)
+    print(f"\nСоцсети (twitter/site): {soc}/{len(results)} токенов")
 
-def print_recommendations(results: list[TokenMetrics]):
-    print("\n\n=== ТЕКУЩИЕ ПОРОГИ vs ДАННЫЕ УСПЕШНЫХ ТОКЕНОВ ===\n")
-    print("Параметр              | Текущий порог  | Данные успешных | Рекомендация")
-    print("-" * 80)
 
-    age_vals = [r.age_minutes for r in results if r.age_minutes is not None]
-    vol_vals = [r.volume_5m_usd for r in results]
-    buyers_vals = [r.unique_buyers_5m for r in results]
-    holder_vals = [r.max_holder_pct for r in results if r.max_holder_pct is not None]
-    top10_vals = [r.top10_pct for r in results if r.top10_pct is not None]
-    bundle_vals = [r.bundle_pct for r in results if r.bundle_pct is not None]
+def print_recommendations(results: list[Metrics]):
+    age_vals    = [r.age_minutes    for r in results if r.age_minutes    is not None]
+    vol_vals    = [r.vol_5m         for r in results]
+    buy_vals    = [r.buyers_5m      for r in results]
+    h_vals      = [r.max_holder_pct for r in results if r.max_holder_pct is not None]
+    t10_vals    = [r.top10_pct      for r in results if r.top10_pct      is not None]
+    bnd_vals    = [r.bundle_pct     for r in results if r.bundle_pct     is not None]
+    sell_vals   = [r.sell_ratio     for r in results if r.sell_ratio     is not None]
 
-    def s(vals):
-        clean = [v for v in vals if v is not None]
-        if not clean:
-            return "—"
-        return f"{min(clean):.1f}–{max(clean):.1f}"
+    def rng(vals):
+        c = [v for v in vals if v is not None]
+        return f"{min(c):.1f}–{max(c):.1f}" if c else "—"
 
+    print("\n\n=== ТЕКУЩИЕ ПОРОГИ vs ДАННЫЕ ===\n")
     rows = [
-        ("MC_ANALYZE_MIN ($)",    "7,000",   "—",          "7,000 — уже установлен"),
-        ("MAX_TOKEN_AGE_HOURS",  "2ч",       f"{s(age_vals)} мин", "см. ниже"),
-        ("MIN_VOLUME_USD_5MIN",  "$150",     f"${s(vol_vals)}",    "см. ниже"),
-        ("MIN_UNIQUE_BUYERS",    "2",        s(buyers_vals),       "см. ниже"),
-        ("MAX_SINGLE_HOLDER%",   "7.0%",     s(holder_vals),       "см. ниже"),
-        ("MAX_TOP10%",           "22.0%",    s(top10_vals),        "см. ниже"),
-        ("MAX_BUNDLE%",          "20%",      s(bundle_vals),       "см. ниже"),
+        ("MAX_TOKEN_AGE_HOURS",   "2ч (120мин)",  f"{rng(age_vals)} мин"),
+        ("MIN_VOLUME_USD_5MIN",   "$150",          f"${rng(vol_vals)}"),
+        ("MIN_UNIQUE_BUYERS_5MIN","2",             rng(buy_vals)),
+        ("MAX_SINGLE_HOLDER%",    "7.0%",          rng(h_vals)),
+        ("MAX_TOP10%",            "22.0%",         rng(t10_vals)),
+        ("MAX_BUNDLE%",           "20%",           rng(bnd_vals)),
+        ("Sell ratio (инфо)",     "нет порога",    rng(sell_vals)),
     ]
-    for r in rows:
-        print(f"{r[0]:>22} | {r[1]:>14} | {r[2]:>15} | {r[3]}")
+    print(f"{'Параметр':>24} | {'Текущий':>14} | {'Успешные токены':>16}")
+    print("-" * 65)
+    for p, cur, data in rows:
+        print(f"{p:>24} | {cur:>14} | {data:>16}")
 
-    print("\n\n=== ГОТОВЫЙ БЛОК .env (на основе данных) ===\n")
-    print("""# ===== Оптимизированные пороги (на основе анализа 5 успешных токенов) =====
+    print("\n\n=== ГОТОВЫЙ БЛОК .env ===\n")
+    # Рассчитываем рекомендуемые значения на основе данных
+    def safe_max(vals, fallback):
+        c = [v for v in vals if v is not None]
+        return max(c) * 1.15 if c else fallback  # +15% запас сверху
 
-# Запуск анализа: чуть ниже диапазона алерта, чтобы не пропустить вход
-MC_ANALYZE_MIN=7000
+    def safe_min(vals, fallback):
+        c = [v for v in vals if v is not None]
+        return min(c) * 0.85 if c else fallback  # -15% запас снизу
 
-# Концентрация: данные успешных токенов — см. таблицу выше
-# Если max_holder < 10% и top10 < 30% у успешных, можно чуть поднять
-MAX_SINGLE_HOLDER_PERCENT=7.0
-MAX_TOP10_HOLDERS_PERCENT=22.0
+    rec_age    = max(safe_max(age_vals, 90) / 60, 1.0)
+    rec_vol    = max(safe_min(vol_vals, 150), 50)
+    rec_buyers = max(min(buy_vals) if buy_vals else 2, 2)
+    rec_maxh   = min(safe_max(h_vals, 7.0), 15.0)
+    rec_top10  = min(safe_max(t10_vals, 22.0), 35.0)
+    rec_bundle = min(safe_max(bnd_vals, 20.0), 25.0)
 
-# Объём: если успешные токены входили с $50–$200, снижай до 100
-# Если $200+, можно оставить 150
-MIN_VOLUME_USD_5MIN=150
-
-# Покупатели: 2 — минимально разумно, при 3 появятся ложные отсечки
-MIN_UNIQUE_BUYERS_5MIN=2
-
-# Бандлы: 20% — если у успешных были бандлы до 15%, можно снизить до 15
-MAX_BUNDLE_PERCENT=20
-
-# Возраст: 2ч покрывает большинство кейсов
-# Если успешные токены входили в диапазон за 30–90 мин — оставляй 2ч
-MAX_TOKEN_AGE_HOURS=2
-
-# HUMAN / UNKNOWN: стандарт
-HUMAN_MIN_PERCENT=60
-UNKNOWN_MAX_PERCENT=20
-
-# Score: 7.5 даёт достаточно пространства для токенов с неизвестным девом
-MIN_SCORE=7.5
-
-# MSR: 80% — строго, но правильно
-MSR_MIN_PERCENT=80
-""")
+    print(f"# Рекомендации на основе {len([r for r in results if r.entry_mc])} токенов с данными\n")
+    print(f"MAX_TOKEN_AGE_HOURS={rec_age:.1f}    # успешные входили за {rng(age_vals)} мин")
+    print(f"MIN_VOLUME_USD_5MIN={rec_vol:.0f}   # объём успешных: ${rng(vol_vals)}")
+    print(f"MIN_UNIQUE_BUYERS_5MIN={rec_buyers}   # покупателей успешных: {rng(buy_vals)}")
+    print(f"MAX_SINGLE_HOLDER_PERCENT={rec_maxh:.1f}  # макс. холдер успешных: {rng(h_vals)}%")
+    print(f"MAX_TOP10_HOLDERS_PERCENT={rec_top10:.1f}  # топ-10 успешных: {rng(t10_vals)}%")
+    print(f"MAX_BUNDLE_PERCENT={rec_bundle:.0f}       # бандлы успешных: {rng(bnd_vals)}%")
+    if sell_vals:
+        print(f"\n# Sell ratio успешных: {rng(sell_vals)}% — учти при добавлении фильтра")
 
 
 async def main():
-    if not HELIUS_API_KEY or HELIUS_API_KEY == "your_helius_api_key":
+    if not HELIUS_API_KEY or "your_" in HELIUS_API_KEY:
         print("❌ HELIUS_API_KEY не задан в .env")
         return
 
-    print(f"Цена SOL: получаю...")
+    print("Получаю цену SOL...")
     async with aiohttp.ClientSession() as session:
         sol_price = await get_sol_price(session)
-        print(f"Цена SOL: ${sol_price:.2f}")
+        print(f"SOL = ${sol_price:.2f}\n")
 
         results = []
         for mint in TARGET_MINTS:
-            print(f"\n{'=' * 60}")
-            print(f"Анализирую: {mint}")
+            print(f"\n{'═'*60}\nАнализирую: {mint}")
             try:
-                metrics = await analyze_mint(session, mint, sol_price)
-                results.append(metrics)
+                m = await analyze(session, mint, sol_price)
             except Exception as e:
-                print(f"Ошибка: {e}")
-                results.append(TokenMetrics(mint=mint, notes=[str(e)]))
-            await asyncio.sleep(1)
+                print(f"  ОШИБКА: {e}")
+                m = Metrics(mint=mint, notes=[str(e)])
+            results.append(m)
+            await asyncio.sleep(1.5)
 
     print_table(results)
     print_stats(results)
