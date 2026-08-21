@@ -86,18 +86,19 @@ async def get_sigs(session, address: str, limit: int = 1000) -> list:
 
 
 async def get_tx(session, sig: str) -> Optional[dict]:
-    """Fetch one transaction via public RPC. No batching — public RPC throttles batches."""
+    """Fetch one transaction via Helius (archive node — stores logMessages for old tx).
+    Public RPC strips logMessages for transactions older than ~2 weeks."""
     return await rpc(session, "getTransaction",
                      [sig, {"encoding": "jsonParsed", "commitment": "confirmed",
                             "maxSupportedTransactionVersion": 0}],
                      label=f"getTx({sig[:8]})",
-                     url=RPC_URL_PUBLIC)
+                     url=RPC_URL_HELIUS)
 
 
 async def get_largest(session, mint: str) -> list:
     r = await rpc(session, "getTokenLargestAccounts",
                   [mint, {"commitment": "confirmed"}], label="getLargest",
-                  url=RPC_URL_PUBLIC)
+                  url=RPC_URL_HELIUS)
     return (r or {}).get("value") or []
 
 
@@ -251,7 +252,7 @@ async def analyze(session: aiohttp.ClientSession, mint: str, sol_price: float) -
         m.last_tx_sec = now - newest_time
 
     # ── Читаем транзакции (индивидуально — public RPC throttles batches) ───────
-    MAX_TX   = 150  # 150 tx × 0.5s = ~75s per token
+    MAX_TX   = 300  # max транзакций для поиска entry MC
     print(f"  [{short}] Читаю транзакции (max {MAX_TX}, по одной, 0.5с между)...")
     valid_sigs = [s["signature"] for s in chron if s.get("signature") and not s.get("err")]
 
