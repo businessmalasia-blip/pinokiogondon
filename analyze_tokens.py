@@ -75,34 +75,6 @@ async def rpc(session: aiohttp.ClientSession, method: str, params,
     return None
 
 
-async def batch_rpc(session: aiohttp.ClientSession, calls: list,
-                    url: str = RPC_URL_PUBLIC) -> list:
-    """Send multiple JSON-RPC calls in one POST. Returns list of results (None on error)."""
-    if not calls:
-        return []
-    payload = [{"jsonrpc": "2.0", "id": i, **c} for i, c in enumerate(calls)]
-    for attempt in range(5):
-        try:
-            async with session.post(url, json=payload,
-                                    timeout=aiohttp.ClientTimeout(total=60)) as r:
-                if r.status == 429:
-                    wait = min(2 ** attempt, 30)
-                    print(f"    [429 batch/{len(calls)}] жду {wait}с")
-                    await asyncio.sleep(wait)
-                    continue
-                if r.status != 200:
-                    print(f"    [HTTP {r.status}] batch/{len(calls)}")
-                    return [None] * len(calls)
-                data = await r.json()
-                if isinstance(data, list):
-                    return [d.get("result") if "error" not in d else None for d in data]
-                return [None] * len(calls)
-        except Exception as e:
-            wait = 2 ** attempt
-            print(f"    [EXC batch attempt {attempt}]: {e} — жду {wait}с")
-            await asyncio.sleep(wait)
-    return [None] * len(calls)
-
 
 async def get_sigs(session, address: str, limit: int = 1000) -> list:
     await asyncio.sleep(0.5)
@@ -113,15 +85,13 @@ async def get_sigs(session, address: str, limit: int = 1000) -> list:
     return r or []
 
 
-async def get_tx_batch(session, sigs: list) -> list:
-    """Fetch transactions via public RPC (no rate-limit competition with bot)."""
-    calls = [
-        {"method": "getTransaction",
-         "params": [sig, {"encoding": "jsonParsed", "commitment": "confirmed",
-                          "maxSupportedTransactionVersion": 0}]}
-        for sig in sigs
-    ]
-    return await batch_rpc(session, calls, url=RPC_URL_PUBLIC)
+async def get_tx(session, sig: str) -> Optional[dict]:
+    """Fetch one transaction via public RPC. No batching — public RPC throttles batches."""
+    return await rpc(session, "getTransaction",
+                     [sig, {"encoding": "jsonParsed", "commitment": "confirmed",
+                            "maxSupportedTransactionVersion": 0}],
+                     label=f"getTx({sig[:8]})",
+                     url=RPC_URL_PUBLIC)
 
 
 async def get_largest(session, mint: str) -> list:
@@ -280,8 +250,9 @@ async def analyze(session: aiohttp.ClientSession, mint: str, sol_price: float) -
     if newest_time:
         m.last_tx_sec = now - newest_time
 
-    # ── Читаем транзакции для поиска entry point, volume, buy/sell ───────────
-    print(f"  [{short}] Читаю транзакции batch-методом (max 300)...")
+    # ── Читаем транзакции (индивидуально — public RPC throttles batches) ───────
+    MAX_TX   = 150  # 150 tx × 0.5s = ~75s per token
+    print(f"  [{short}] Читаю транзакции (max {MAX_TX}, по одной, 0.5с между)...")
     valid_sigs = [s["signature"] for s in chron if s.get("signature") and not s.get("err")]
 
     entry_time  = None
@@ -289,44 +260,40 @@ async def analyze(session: aiohttp.ClientSession, mint: str, sol_price: float) -
     buy_count   = 0
     sell_count  = 0
 
-    BATCH = 10  # 10 tx per POST
-    for i in range(0, min(len(valid_sigs), 300), BATCH):
-        batch = valid_sigs[i:i + BATCH]
-        print(f"  [{short}] batch {i//BATCH + 1}: сигнатуры {i+1}–{i+len(batch)}")
-        txs = await get_tx_batch(session, batch)
-        await asyncio.sleep(2.0)  # pause after each batch to avoid 429
-
-        for tx in txs:
-            if not tx:
+    for i, sig in enumerate(valid_sigs[:MAX_TX]):
+        if i % 25 == 0:
+            print(f"  [{short}] tx {i+1}/{min(len(valid_sigs), MAX_TX)}...")
+        tx = await get_tx(session, sig)
+        await asyncio.sleep(0.5)
+        if not tx:
+            continue
+        tx_time = tx.get("blockTime")
+        fp      = fee_payer(tx)
+        logs    = (tx.get("meta") or {}).get("logMessages") or []
+        for line in logs:
+            ev = parse_trade(line)
+            if not ev:
                 continue
-            tx_time = tx.get("blockTime")
-            fp      = fee_payer(tx)
-            logs    = (tx.get("meta") or {}).get("logMessages") or []
-            for line in logs:
-                ev = parse_trade(line)
-                if not ev:
-                    continue
-                mc = mc_from_reserves(ev["vs"], ev["vt"], sol_price)
-                usd = ev["sol_amt"] / 1e9 * sol_price
-                if ev["is_buy"]:
-                    buy_count += 1
-                else:
-                    sell_count += 1
-                if tx_time and fp:
-                    all_trades.append((tx_time, usd, ev["is_buy"], fp))
+            mc  = mc_from_reserves(ev["vs"], ev["vt"], sol_price)
+            usd = ev["sol_amt"] / 1e9 * sol_price
+            if ev["is_buy"]:
+                buy_count += 1
+            else:
+                sell_count += 1
+            if tx_time and fp:
+                all_trades.append((tx_time, usd, ev["is_buy"], fp))
 
-                # Первый вход в диапазон
-                if entry_time is None and mc and MC_LOW <= mc <= MC_HIGH:
-                    entry_time   = tx_time
-                    m.entry_mc   = mc
-                    if oldest_time and tx_time:
-                        m.age_minutes = (tx_time - oldest_time) / 60
-                    print(f"  [{short}] ✅ Entry MC ${mc:,.0f} "
-                          f"(возраст {m.age_minutes:.1f} мин)" if m.age_minutes else
-                          f"  [{short}] ✅ Entry MC ${mc:,.0f}")
+            # Первый вход в диапазон
+            if entry_time is None and mc and MC_LOW <= mc <= MC_HIGH:
+                entry_time  = tx_time
+                m.entry_mc  = mc
+                if oldest_time and tx_time:
+                    m.age_minutes = (tx_time - oldest_time) / 60
+                age_str = f" (возраст {m.age_minutes:.1f} мин)" if m.age_minutes else ""
+                print(f"  [{short}] ✅ Entry MC ${mc:,.0f}{age_str}")
 
-        if entry_time and i >= 60:
-            break  # entry найден, достаточно данных для volume
+        if entry_time and i >= 50:
+            break  # entry найден и набрали данные для volume
 
     # ── Volume и buyers за 5 мин до entry ───────────────────────────────────
     ref_time = entry_time or newest_time or now
@@ -374,9 +341,8 @@ async def analyze(session: aiohttp.ClientSession, mint: str, sol_price: float) -
     creation_sig = chron[0].get("signature") if chron else None
     if creation_sig:
         print(f"  [{short}] Читаю creation tx для дева...")
-        results_batch = await get_tx_batch(session, [creation_sig])
+        creation_tx = await get_tx(session, creation_sig)
         await asyncio.sleep(1.0)
-        creation_tx = results_batch[0] if results_batch else None
         if creation_tx:
             creator = fee_payer(creation_tx)
             m.dev_addr = creator
