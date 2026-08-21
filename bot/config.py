@@ -88,10 +88,6 @@ class Settings:
     dev_early_buy_window: int
     dev_early_sell_protection: bool
 
-    # Публичный Solana RPC для стандартных методов (без кредитов Helius)
-    public_rpc_url: str
-    public_rate_limit: float
-
     # WebSocket (отдельный URL — не Helius, чтобы не тратить streaming-кредиты)
     ws_rpc_url: str
 
@@ -196,11 +192,6 @@ def load_settings() -> Settings:
         das_min_accounts=int(os.getenv("DAS_MIN_ACCOUNTS", "15")),
         das_retry_delay=float(os.getenv("DAS_RETRY_DELAY", "3")),
         das_retries=int(os.getenv("DAS_RETRIES", "1")),
-        public_rpc_url=os.getenv(
-            "PUBLIC_RPC_URL",
-            "https://rpc.ankr.com/solana",
-        ),
-        public_rate_limit=float(os.getenv("PUBLIC_RATE_LIMIT", "0.1")),
         ws_rpc_url=os.getenv(
             "WS_RPC_URL",
             "wss://api.mainnet-beta.solana.com",
