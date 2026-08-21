@@ -47,12 +47,12 @@ def _nid():
 
 async def rpc(session: aiohttp.ClientSession, method: str, params, label="") -> Optional[object]:
     payload = {"jsonrpc": "2.0", "id": _nid(), "method": method, "params": params}
-    for attempt in range(3):
+    for attempt in range(5):
         try:
             async with session.post(RPC_URL, json=payload,
                                     timeout=aiohttp.ClientTimeout(total=30)) as r:
                 if r.status == 429:
-                    wait = 2 ** attempt
+                    wait = min(2 ** attempt, 30)
                     print(f"    [429] {label or method} — жду {wait}с")
                     await asyncio.sleep(wait)
                     continue
@@ -66,22 +66,55 @@ async def rpc(session: aiohttp.ClientSession, method: str, params, label="") -> 
                 return data.get("result")
         except Exception as e:
             print(f"    [EXC attempt {attempt}] {label or method}: {e}")
-            await asyncio.sleep(1)
+            await asyncio.sleep(2 ** attempt)
     return None
 
 
+async def batch_rpc(session: aiohttp.ClientSession, calls: list) -> list:
+    """Send multiple JSON-RPC calls in one POST. Returns list of results (None on error)."""
+    if not calls:
+        return []
+    payload = [{"jsonrpc": "2.0", "id": i, **c} for i, c in enumerate(calls)]
+    for attempt in range(5):
+        try:
+            async with session.post(RPC_URL, json=payload,
+                                    timeout=aiohttp.ClientTimeout(total=60)) as r:
+                if r.status == 429:
+                    wait = min(2 ** attempt, 30)
+                    print(f"    [429 batch/{len(calls)}] жду {wait}с")
+                    await asyncio.sleep(wait)
+                    continue
+                if r.status != 200:
+                    print(f"    [HTTP {r.status}] batch/{len(calls)}")
+                    return [None] * len(calls)
+                data = await r.json()
+                if isinstance(data, list):
+                    return [d.get("result") if "error" not in d else None for d in data]
+                return [None] * len(calls)
+        except Exception as e:
+            wait = 2 ** attempt
+            print(f"    [EXC batch attempt {attempt}]: {e} — жду {wait}с")
+            await asyncio.sleep(wait)
+    return [None] * len(calls)
+
+
 async def get_sigs(session, address: str, limit: int = 1000) -> list:
+    await asyncio.sleep(0.5)
     r = await rpc(session, "getSignaturesForAddress",
                   [address, {"limit": limit, "commitment": "confirmed"}],
                   label=f"getSigs({address[:8]})")
     return r or []
 
 
-async def get_tx(session, sig: str) -> Optional[dict]:
-    return await rpc(session, "getTransaction",
-                     [sig, {"encoding": "jsonParsed", "commitment": "confirmed",
-                            "maxSupportedTransactionVersion": 0}],
-                     label=f"getTx({sig[:8]})")
+async def get_tx_batch(session, sigs: list) -> list:
+    """Fetch up to len(sigs) transactions in a single batch POST."""
+    calls = [
+        {"method": "getTransaction",
+         "params": [sig, {"encoding": "jsonParsed", "commitment": "confirmed",
+                          "maxSupportedTransactionVersion": 0}]}
+        for sig in sigs
+    ]
+    return await batch_rpc(session, calls)
 
 
 async def get_largest(session, mint: str) -> list:
@@ -199,8 +232,9 @@ async def analyze(session: aiohttp.ClientSession, mint: str, sol_price: float) -
     print(f"  [{short}] Bonding curve: {bc[:12]}...")
 
     # ── Metadata (DAS) ───────────────────────────────────────────────────────
+    await asyncio.sleep(1.0)
     asset = await get_asset(session, mint)
-    await asyncio.sleep(0.35)
+    await asyncio.sleep(1.0)
     if asset:
         m.name   = asset.get("content", {}).get("metadata", {}).get("name",   "—")
         m.symbol = asset.get("content", {}).get("metadata", {}).get("symbol", "—")
@@ -213,14 +247,14 @@ async def analyze(session: aiohttp.ClientSession, mint: str, sol_price: float) -
     # ── Сигнатуры с bonding curve (основная активность) ─────────────────────
     print(f"  [{short}] Запрашиваю сигнатуры bonding curve (limit=1000)...")
     bc_sigs = await get_sigs(session, bc, limit=1000)
-    await asyncio.sleep(0.35)
+    await asyncio.sleep(1.0)
     print(f"  [{short}] Сигнатур bonding curve: {len(bc_sigs)}")
 
     if not bc_sigs:
         # Пробуем mint напрямую (иногда там есть creation tx)
         print(f"  [{short}] Пробую mint напрямую...")
         mint_sigs = await get_sigs(session, mint, limit=100)
-        await asyncio.sleep(0.35)
+        await asyncio.sleep(1.0)
         print(f"  [{short}] Сигнатур mint: {len(mint_sigs)}")
         if not mint_sigs:
             m.notes.append("нет данных ни по bonding curve, ни по mint (токен слишком старый?)")
@@ -237,7 +271,7 @@ async def analyze(session: aiohttp.ClientSession, mint: str, sol_price: float) -
         m.last_tx_sec = now - newest_time
 
     # ── Читаем транзакции для поиска entry point, volume, buy/sell ───────────
-    print(f"  [{short}] Читаю транзакции (max 300)...")
+    print(f"  [{short}] Читаю транзакции batch-методом (max 300)...")
     valid_sigs = [s["signature"] for s in chron if s.get("signature") and not s.get("err")]
 
     entry_time  = None
@@ -245,12 +279,14 @@ async def analyze(session: aiohttp.ClientSession, mint: str, sol_price: float) -
     buy_count   = 0
     sell_count  = 0
 
-    BATCH = 15
+    BATCH = 10  # 10 tx per POST
     for i in range(0, min(len(valid_sigs), 300), BATCH):
         batch = valid_sigs[i:i + BATCH]
-        for sig in batch:
-            tx = await get_tx(session, sig)
-            await asyncio.sleep(0.12)
+        print(f"  [{short}] batch {i//BATCH + 1}: сигнатуры {i+1}–{i+len(batch)}")
+        txs = await get_tx_batch(session, batch)
+        await asyncio.sleep(2.0)  # pause after each batch to avoid 429
+
+        for tx in txs:
             if not tx:
                 continue
             tx_time = tx.get("blockTime")
@@ -306,8 +342,9 @@ async def analyze(session: aiohttp.ClientSession, mint: str, sol_price: float) -
 
     # ── Холдеры ──────────────────────────────────────────────────────────────
     print(f"  [{short}] Читаю холдеров...")
+    await asyncio.sleep(1.0)
     holders = await get_largest(session, mint)
-    await asyncio.sleep(0.35)
+    await asyncio.sleep(1.0)
     if holders:
         shares = []
         for h in holders:
@@ -327,14 +364,15 @@ async def analyze(session: aiohttp.ClientSession, mint: str, sol_price: float) -
     creation_sig = chron[0].get("signature") if chron else None
     if creation_sig:
         print(f"  [{short}] Читаю creation tx для дева...")
-        creation_tx = await get_tx(session, creation_sig)
-        await asyncio.sleep(0.35)
+        results_batch = await get_tx_batch(session, [creation_sig])
+        await asyncio.sleep(1.0)
+        creation_tx = results_batch[0] if results_batch else None
         if creation_tx:
             creator = fee_payer(creation_tx)
             m.dev_addr = creator
             if creator:
                 dev_sigs = await get_sigs(session, creator, limit=50)
-                await asyncio.sleep(0.35)
+                await asyncio.sleep(1.0)
                 if dev_sigs:
                     m.dev_status = f"Unknown (история: {len(dev_sigs)} tx)"
                 else:
@@ -488,7 +526,7 @@ async def main():
                 print(f"  ОШИБКА: {e}")
                 m = Metrics(mint=mint, notes=[str(e)])
             results.append(m)
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(3.0)
 
     print_table(results)
     print_stats(results)
