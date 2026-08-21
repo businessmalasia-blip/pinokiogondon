@@ -925,7 +925,13 @@ async def resolve_bonding_curve(
         state = await _fetch_curve_state(ctx, derived)
         if state:
             return derived, state
-        log.info("[%s] PDA кривой не подтвердился — пробую через транзакцию", mint)
+        # Если getAccountInfo вернул None — скорее всего 429, а не "кривой нет".
+        # PDA для pump.fun детерминирован и всегда верен — возвращаем адрес
+        # без state; state=None обрабатывается в candidate_worker (raw_supply=0).
+        # Запасной путь через getTransaction нужен только если PDA не выводится.
+        # Делаем fallback только когда derived=None (нестандартная программа).
+        log.info("[%s] getAccountInfo вернул None для PDA — возвращаю derived без state", mint)
+        return derived, None
 
     tx = await ctx.helius.get_transaction(signature)
     if not tx:

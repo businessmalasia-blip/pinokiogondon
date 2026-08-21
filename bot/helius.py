@@ -58,6 +58,21 @@ class HeliusClient:
                 await asyncio.sleep(wait)
             self._last_request_at = time.monotonic()
 
+    async def _throttle_n(self, n: int) -> None:
+        """Throttle для батча из n запросов.
+
+        Helius считает каждый элемент батча как отдельный кредит, поэтому
+        pre-charge rate limiter пропорционально: следующий вызов будет ждать
+        как будто мы сделали n одиночных запросов подряд.
+        """
+        async with self._lock:
+            now = time.monotonic()
+            wait = self._last_request_at + self._rate_limit - now
+            if wait > 0:
+                await asyncio.sleep(wait)
+            # Сдвигаем окно на n запросов вперёд
+            self._last_request_at = time.monotonic() + self._rate_limit * (n - 1)
+
     async def request(self, method: str, params: Any) -> Any:
         for attempt in range(2):  # максимум 1 повтор при 429
             await self._throttle()
@@ -116,7 +131,7 @@ class HeliusClient:
         ]
         for attempt in range(2):  # максимум 1 повтор при 429
             self._record_calls(len(requests))
-            await self._throttle()
+            await self._throttle_n(len(requests))
             try:
                 async with self._session.post(
                     self._rpc_url,
