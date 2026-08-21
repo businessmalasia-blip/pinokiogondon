@@ -19,7 +19,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "")
-RPC_URL        = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
+# Use public Solana RPC for heavy lifting (signatures, transactions, holders)
+# so the analysis script doesn't compete with the running bot on the Helius key.
+# Helius is only used for DAS-only methods (getAsset).
+RPC_URL_PUBLIC = "https://api.mainnet-beta.solana.com"
+RPC_URL_HELIUS = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 PUMP_PROGRAM   = os.getenv("PUMP_PROGRAM", "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P")
 SOL_PRICE_FALLBACK = 150.0
 
@@ -45,11 +49,12 @@ def _nid():
 
 # ── RPC ─────────────────────────────────────────────────────────────────────
 
-async def rpc(session: aiohttp.ClientSession, method: str, params, label="") -> Optional[object]:
+async def rpc(session: aiohttp.ClientSession, method: str, params,
+              label="", url: str = RPC_URL_PUBLIC) -> Optional[object]:
     payload = {"jsonrpc": "2.0", "id": _nid(), "method": method, "params": params}
     for attempt in range(5):
         try:
-            async with session.post(RPC_URL, json=payload,
+            async with session.post(url, json=payload,
                                     timeout=aiohttp.ClientTimeout(total=30)) as r:
                 if r.status == 429:
                     wait = min(2 ** attempt, 30)
@@ -70,14 +75,15 @@ async def rpc(session: aiohttp.ClientSession, method: str, params, label="") -> 
     return None
 
 
-async def batch_rpc(session: aiohttp.ClientSession, calls: list) -> list:
+async def batch_rpc(session: aiohttp.ClientSession, calls: list,
+                    url: str = RPC_URL_PUBLIC) -> list:
     """Send multiple JSON-RPC calls in one POST. Returns list of results (None on error)."""
     if not calls:
         return []
     payload = [{"jsonrpc": "2.0", "id": i, **c} for i, c in enumerate(calls)]
     for attempt in range(5):
         try:
-            async with session.post(RPC_URL, json=payload,
+            async with session.post(url, json=payload,
                                     timeout=aiohttp.ClientTimeout(total=60)) as r:
                 if r.status == 429:
                     wait = min(2 ** attempt, 30)
@@ -102,29 +108,33 @@ async def get_sigs(session, address: str, limit: int = 1000) -> list:
     await asyncio.sleep(0.5)
     r = await rpc(session, "getSignaturesForAddress",
                   [address, {"limit": limit, "commitment": "confirmed"}],
-                  label=f"getSigs({address[:8]})")
+                  label=f"getSigs({address[:8]})",
+                  url=RPC_URL_PUBLIC)
     return r or []
 
 
 async def get_tx_batch(session, sigs: list) -> list:
-    """Fetch up to len(sigs) transactions in a single batch POST."""
+    """Fetch transactions via public RPC (no rate-limit competition with bot)."""
     calls = [
         {"method": "getTransaction",
          "params": [sig, {"encoding": "jsonParsed", "commitment": "confirmed",
                           "maxSupportedTransactionVersion": 0}]}
         for sig in sigs
     ]
-    return await batch_rpc(session, calls)
+    return await batch_rpc(session, calls, url=RPC_URL_PUBLIC)
 
 
 async def get_largest(session, mint: str) -> list:
     r = await rpc(session, "getTokenLargestAccounts",
-                  [mint, {"commitment": "confirmed"}], label="getLargest")
+                  [mint, {"commitment": "confirmed"}], label="getLargest",
+                  url=RPC_URL_PUBLIC)
     return (r or {}).get("value") or []
 
 
 async def get_asset(session, mint: str) -> Optional[dict]:
-    return await rpc(session, "getAsset", {"id": mint}, label="getAsset")
+    # DAS method — only available on Helius, not public RPC
+    return await rpc(session, "getAsset", {"id": mint}, label="getAsset",
+                     url=RPC_URL_HELIUS)
 
 
 async def get_sol_price(session: aiohttp.ClientSession) -> float:
