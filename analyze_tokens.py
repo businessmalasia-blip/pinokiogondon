@@ -21,9 +21,9 @@ load_dotenv()
 HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "")
 # Цепочка бесплатных архивных RPC. Если один 429 — переключаемся на следующий.
 ARCHIVE_RPCS = [
-    "https://rpc.ankr.com/solana",
     "https://solana-rpc.publicnode.com",
     "https://api.mainnet-beta.solana.com",
+    "https://rpc.ankr.com/solana",
 ]
 _rpc_idx = 0  # текущий активный RPC в цепочке
 RPC_URL_HELIUS = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
@@ -63,23 +63,25 @@ async def rpc(session: aiohttp.ClientSession, method: str, params,
         try:
             async with session.post(target, json=payload,
                                     timeout=aiohttp.ClientTimeout(total=30)) as r:
-                if r.status == 429:
+                if r.status in (429, 403):
                     if use_chain:
                         old_idx = _rpc_idx % len(ARCHIVE_RPCS)
                         _rpc_idx += 1
                         new_idx = _rpc_idx % len(ARCHIVE_RPCS)
-                        print(f"    [429→switch] {label or method}: "
+                        print(f"    [{r.status}→switch] {label or method}: "
                               f"{ARCHIVE_RPCS[old_idx].split('/')[2]} → "
                               f"{ARCHIVE_RPCS[new_idx].split('/')[2]}")
                         await asyncio.sleep(1)
                     else:
                         wait = min(2 ** attempt, 30)
-                        print(f"    [429] {label or method} — жду {wait}с")
+                        print(f"    [{r.status}] {label or method} — жду {wait}с")
                         await asyncio.sleep(wait)
                     continue
                 if r.status != 200:
                     print(f"    [HTTP {r.status}] {label or method} via {target.split('/')[2]}")
-                    return None
+                    if use_chain:
+                        _rpc_idx += 1
+                    continue
                 data = await r.json()
                 if "error" in data:
                     print(f"    [RPC ERR] {label or method}: {data['error']}")
