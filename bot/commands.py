@@ -16,9 +16,11 @@ FILTER_ROWS = (
     ("age", "отсеяно"),
     ("inactive", "отсеяно"),
     ("concentration", "отсеяно"),
+    ("bundle", "отсеяно"),
     ("dev", "отсеяно"),
     ("human_strict", "отсеяно"),
     ("score", "отсеяно"),
+    ("early_sell", "отсеяно"),
     ("passed", "прошло"),
 )
 
@@ -77,9 +79,11 @@ FILTER_LABELS = {
     "age":         ("⏳", "Возраст"),
     "inactive":    ("💤", "Активность"),
     "concentration": ("🏦", "Концентрация"),
+    "bundle":      ("📦", "Бандлы"),
     "dev":         ("👨‍💻", "Дев / Early buy"),
     "human_strict":("👥", "HUMAN strict"),
     "score":       ("🎯", "Score / Vol / Buyers"),
+    "early_sell":  ("🚨", "Ранняя продажа"),
     "passed":      ("✅", "Прошло все фильтры"),
 }
 
@@ -184,6 +188,7 @@ async def cmd_settings(message: Message, ctx) -> None:
         f"  Ранняя покупка дева: {early_buy}  (окно {s.dev_early_buy_window}с)",
         f"  Защита от ранней продажи дева: {'✅ вкл' if s.dev_early_sell_protection else '❌ отключена'}",
         f"  Unknown-дев: стандартные пороги (HUMAN {s.human_min_percent:.0f}/{s.unknown_max_percent:.0f}, Score {s.min_score})",
+        f"  Ранняя продажа топ-покупателей: топ-{s.early_sell_top_buyers}, окно {s.early_sell_window_seconds}с",
         "",
         "🧮 <b>Скоринг</b>",
         f"  Мин. балл: {s.min_score} / 10",
@@ -202,6 +207,16 @@ async def cmd_settings(message: Message, ctx) -> None:
         f"  DAS retry:          {s.das_retries} повтор, задержка {s.das_retry_delay:.0f}с",
         f"  Параллельный старт (sigs + asset): ✅",
         f"  429 защита:         1 повтор → SKIPPED",
+        "",
+        "🐦 <b>Twitter-скрапер</b>",
+        f"  {'✅ включён' if s.twitter_scraper_enabled else '❌ выключен'}",
+        *(
+            [
+                f"  Мин. упоминаний за 15 мин: {s.twitter_min_mentions_15min}",
+                f"  Бонус к скору: +{s.twitter_score_bonus}",
+            ]
+            if s.twitter_scraper_enabled else []
+        ),
     ]
     await message.answer("\n".join(lines))
 

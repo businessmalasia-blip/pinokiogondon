@@ -124,6 +124,17 @@ class Settings:
     alert_dedup_ttl: int
     log_level: str
 
+    # Twitter-скрапер
+    twitter_scraper_enabled: bool
+    twitter_min_mentions_15min: int
+    twitter_score_bonus: float
+    twitter_scraper_timeout: int
+    twitter_scraper_cache_ttl: int
+
+    # Защита от ранних продаж первых покупателей
+    early_sell_window_seconds: int
+    early_sell_top_buyers: int
+
     @property
     def rpc_http_url(self) -> str:
         return f"https://mainnet.helius-rpc.com/?api-key={self.helius_api_key}"
@@ -160,8 +171,8 @@ def load_settings() -> Settings:
         ),
         holder_max_percent=float(os.getenv("MAX_SINGLE_HOLDER_PERCENT", "5.0")),
         top10_max_percent=float(os.getenv("MAX_TOP10_HOLDERS_PERCENT", "25.0")),
-        human_min_percent=float(os.getenv("HUMAN_MIN_PERCENT", "45")),
-        unknown_max_percent=float(os.getenv("UNKNOWN_MAX_PERCENT", "30")),
+        human_min_percent=float(os.getenv("HUMAN_MIN_PERCENT", "50")),
+        unknown_max_percent=float(os.getenv("UNKNOWN_MAX_PERCENT", "25")),
         human_cache_ttl=int(os.getenv("HUMAN_CACHE_TTL", "3600")),
         unknown_cache_ttl=int(os.getenv("UNKNOWN_CACHE_TTL", "3600")),
         human_check_top=int(os.getenv("HUMAN_CHECK_TOP", "30")),
@@ -169,8 +180,8 @@ def load_settings() -> Settings:
         human_min_candidates=int(os.getenv("HUMAN_MIN_CANDIDATES", "10")),
         bundle_slot_window=int(os.getenv("BUNDLE_SLOT_WINDOW", "2")),
         min_buy_count_last_2min=int(os.getenv("MIN_BUY_COUNT_LAST_2MIN", "2")),
-        max_bundle_percent=float(os.getenv("MAX_BUNDLE_PERCENT", "20.0")),
-        min_score=float(os.getenv("MIN_SCORE", "6.5")),
+        max_bundle_percent=float(os.getenv("MAX_BUNDLE_PERCENT", "15.0")),
+        min_score=float(os.getenv("MIN_SCORE", "7.0")),
         score_weight_human=float(os.getenv("SCORE_WEIGHT_HUMAN", "0.30")),
         score_weight_msr=float(os.getenv("SCORE_WEIGHT_MSR", "0.25")),
         score_weight_concentration=float(os.getenv("SCORE_WEIGHT_CONCENTRATION", "0.25")),
@@ -214,4 +225,11 @@ def load_settings() -> Settings:
         analysis_retry_ttl=int(os.getenv("ANALYSIS_RETRY_TTL", "180")),
         alert_dedup_ttl=int(os.getenv("ALERT_DEDUP_TTL", "86400")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
+        twitter_scraper_enabled=os.getenv("TWITTER_SCRAPER_ENABLED", "0") == "1",
+        twitter_min_mentions_15min=int(os.getenv("TWITTER_MIN_MENTIONS_15MIN", "5")),
+        twitter_score_bonus=float(os.getenv("TWITTER_SCORE_BONUS", "0.5")),
+        twitter_scraper_timeout=int(os.getenv("TWITTER_SCRAPER_TIMEOUT", "10")),
+        twitter_scraper_cache_ttl=int(os.getenv("TWITTER_SCRAPER_CACHE_TTL", "900")),
+        early_sell_window_seconds=int(os.getenv("EARLY_SELL_WINDOW_SECONDS", "300")),
+        early_sell_top_buyers=int(os.getenv("EARLY_SELL_TOP_BUYERS", "10")),
     )

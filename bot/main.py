@@ -17,6 +17,14 @@ from zoneinfo import ZoneInfo
 
 import aiohttp
 import websockets
+
+try:
+    import snscrape.modules.twitter as _sntwitter
+    _SNSCRAPE_OK = True
+except ImportError:
+    _sntwitter = None  # type: ignore[assignment]
+    _SNSCRAPE_OK = False
+
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -48,6 +56,77 @@ from .pump import (
 from .stats import Stats
 
 log = logging.getLogger("bot")
+
+
+# ---------------------------------------------------------------------------
+# Twitter-скрапер (опциональный, не блокирует анализ при любой ошибке)
+# ---------------------------------------------------------------------------
+
+def _scrape_twitter_sync(symbol: str, window_minutes: int = 15) -> int:
+    import datetime as _dt
+    if not _SNSCRAPE_OK:
+        return 0
+    since = (
+        _dt.datetime.utcnow() - _dt.timedelta(minutes=window_minutes)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    query = f"${symbol} OR #{symbol} since:{since}"
+    count = 0
+    try:
+        for _ in _sntwitter.TwitterSearchScraper(query).get_items():
+            count += 1
+            if count >= 200:
+                break
+    except Exception:
+        pass
+    return count
+
+
+async def get_twitter_mentions(ctx: "Context", symbol: str) -> int:
+    s = ctx.settings
+    if not s.twitter_scraper_enabled or not _SNSCRAPE_OK:
+        return 0
+    cache_key = f"twitter_mentions:{symbol}"
+    cached = await ctx.redis.get(cache_key)
+    if cached is not None:
+        return int(cached)
+    try:
+        count = await asyncio.wait_for(
+            asyncio.to_thread(_scrape_twitter_sync, symbol),
+            timeout=s.twitter_scraper_timeout + 2,
+        )
+    except Exception:
+        count = 0
+    await ctx.redis.set(cache_key, str(count), ex=s.twitter_scraper_cache_ttl)
+    return count
+
+
+# ---------------------------------------------------------------------------
+# Трекинг первых покупателей и защита от ранних продаж (только WS-данные)
+# ---------------------------------------------------------------------------
+
+async def track_trade_events(ctx: "Context", logs: list[str]) -> None:
+    """Записывает первых N покупателей и ставит флаг early_sell если кто-то из них
+    продаёт в течение early_sell_window_seconds секунд — без RPC-запросов."""
+    s = ctx.settings
+    for event in iter_trade_events(logs):
+        mint = event["mint"]
+        user = event["user"]
+        ts = float(event["timestamp"])
+        key = f"first_buyers:{mint}"
+        if event["is_buy"]:
+            count = await ctx.redis.zcard(key)
+            if count < s.early_sell_top_buyers:
+                await ctx.redis.zadd(key, {user: ts})
+                if count == 0:
+                    await ctx.redis.expire(key, 7200)
+        else:
+            buy_ts = await ctx.redis.zscore(key, user)
+            if buy_ts is not None and (ts - buy_ts) <= s.early_sell_window_seconds:
+                await ctx.redis.set(f"early_sell:{mint}", "1", ex=3600)
+                log.info(
+                    "[%s] 🚨 ранняя продажа: %s продал через %.0f сек",
+                    mint, user[:8], ts - buy_ts,
+                )
 
 
 @dataclass
@@ -646,6 +725,23 @@ async def analyze_token(
         await ctx.stats.record_filter_result(mint, "score")
         return
 
+    # Twitter-бонус к скору (не блокирует при ошибке)
+    if s.twitter_scraper_enabled:
+        mentions = await get_twitter_mentions(ctx, symbol)
+        if mentions >= s.twitter_min_mentions_15min:
+            score["total"] = round(score["total"] + s.twitter_score_bonus, 1)
+            log.info(
+                "[%s] 🐦 Twitter: %d упоминаний за 15 мин, +%.1f к скору",
+                mint, mentions, s.twitter_score_bonus,
+            )
+
+    # Защита от ранних продаж первых покупателей (флаг из WS-трекинга)
+    if await ctx.redis.exists(f"early_sell:{mint}"):
+        log.info("[%s] ❌ ОТСЕЯН: ранняя продажа одного из первых покупателей", mint)
+        await ctx.stats.record_filter_result(mint, "early_sell")
+        await ctx.redis.set(f"seen:{mint}", "1", ex=s.analysis_retry_ttl)
+        return
+
     # Alpha buyer bonus (после MIN_SCORE — не помогает провальным токенам пройти)
     alpha_bonus = 0.0
     try:
@@ -1042,7 +1138,9 @@ async def pump_logs_loop(ctx: Context) -> None:
                     if value.get("err"):
                         continue
 
-                    candidates = screen_buy_events(ctx, value.get("logs") or [])
+                    logs_list = value.get("logs") or []
+                    asyncio.create_task(track_trade_events(ctx, logs_list))
+                    candidates = screen_buy_events(ctx, logs_list)
                     for mint, mc in candidates:
                         # Дедуп до постановки в очередь: один mint — один анализ
                         seen_key = f"seen:{mint}"
