@@ -271,27 +271,40 @@ async def _check_dev_early_buy(
 async def _check_dev_early_sell(
     ctx: "Context", mint: str, creator: str, mint_signatures: list[dict]
 ) -> bool:
-    """True если дев продал токен среди первых 10 транзакций минта."""
-    from .pump import fee_payer as _fee_payer, parse_trade_event
+    """True если дев продал токен в течение первых DEV_EARLY_SELL_WINDOW_MINUTES минут."""
+    from .pump import parse_trade_event
 
-    # mint_signatures отсортированы новые→старые; берём 10 самых ранних
-    oldest_sigs = [
-        sig["signature"]
-        for sig in list(reversed(mint_signatures))[:10]
-        if not sig.get("err") and sig.get("signature")
-    ]
-    if not oldest_sigs:
+    oldest_time = next(
+        (float(sig["blockTime"]) for sig in reversed(mint_signatures) if sig.get("blockTime")),
+        None,
+    )
+    if oldest_time is None:
         return False
-    txs = await ctx.helius.get_transactions_batch(oldest_sigs)
+    window_sec = ctx.settings.dev_early_sell_window_minutes * 60
+    cutoff = oldest_time + window_sec
+
+    creator_sigs = await ctx.helius.get_signatures(creator, limit=50)
+    early_sigs = [
+        sig["signature"]
+        for sig in creator_sigs
+        if sig.get("blockTime")
+        and oldest_time <= float(sig["blockTime"]) <= cutoff
+        and not sig.get("err")
+        and sig.get("signature")
+    ]
+    if not early_sigs:
+        return False
+    txs = await ctx.helius.get_transactions_batch(early_sigs)
     for tx in txs:
         if not tx:
-            continue
-        fp = _fee_payer(tx)
-        if fp != creator:
             continue
         for line in (tx.get("meta") or {}).get("logMessages") or []:
             event = parse_trade_event(line)
             if event and not event["is_buy"] and event["mint"] == mint:
+                log.info(
+                    "[%s] DEV_EARLY_SELL: dev %s sold within %.0f min",
+                    mint, creator[:8], window_sec / 60,
+                )
                 return True
     return False
 
